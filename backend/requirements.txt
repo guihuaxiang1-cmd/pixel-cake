@@ -1,0 +1,14 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+torch>=2.0.0
+torchvision>=0.15.0
+opencv-python-headless==4.10.0.84
+Pillow>=10.0.0
+numpy>=1.24.0
+transformers>=4.40.0
+diffusers>=0.27.0
+accelerate>=0.30.0
+mediapipe>=0.10.0
+segment-anything>=1.0
+scikit-image>=0.22.0
