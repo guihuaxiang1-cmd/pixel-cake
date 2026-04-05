@@ -1,0 +1,18 @@
+# Force CRLF for Windows batch files
+*.bat text eol=crlf
+
+# Text files
+*.py text
+*.ts text
+*.tsx text
+*.js text
+*.jsx text
+*.json text
+*.md text
+*.css text
+*.html text
+
+# Binary files
+*.ico binary
+*.png binary
+*.jpg binary

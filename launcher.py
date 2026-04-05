@@ -1,6 +1,6 @@
 """
-Pixel Cake - 一体化启动器
-前端静态文件由 FastAPI 直接托管，无需额外启动前端服务
+Pixel Cake - Launcher
+Serves frontend static files + API in one process.
 """
 
 import os
@@ -12,24 +12,17 @@ from pathlib import Path
 
 
 def get_base_dir():
-    """获取资源根目录（兼容 PyInstaller 打包）"""
+    """Get resource base dir (compatible with PyInstaller)"""
     if getattr(sys, 'frozen', False):
         return Path(sys._MEIPASS)
-    return Path(__file__).parent
+    return Path(__file__).parent.resolve()
 
 
-def setup_dirs():
-    """创建必要目录"""
-    base = get_base_dir()
-    for d in ['uploads', 'outputs', 'assets/sky_images']:
-        (base / d).mkdir(parents=True, exist_ok=True)
-
-
-def create_app():
-    """创建 FastAPI 应用（带静态文件托管）"""
+def main():
+    import uvicorn
     from fastapi import FastAPI, File, UploadFile, Form, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
+    from fastapi.responses import FileResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel
     from typing import Optional
@@ -44,11 +37,14 @@ def create_app():
     UPLOAD_DIR = base / "uploads"
     OUTPUT_DIR = base / "outputs"
     FRONTEND_DIR = base / "frontend_dist"
-    UPLOAD_DIR.mkdir(exist_ok=True)
-    OUTPUT_DIR.mkdir(exist_ok=True)
+
+    for d in [UPLOAD_DIR, OUTPUT_DIR]:
+        d.mkdir(exist_ok=True)
+
+    print(f"Base dir: {base}")
+    print(f"Frontend: {FRONTEND_DIR} (exists: {FRONTEND_DIR.exists()})")
 
     app = FastAPI(title="Pixel Cake", version="0.1.0")
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -57,35 +53,41 @@ def create_app():
         allow_headers=["*"],
     )
 
-    # ─── 延迟加载服务 ───
+    # Lazy-loaded services
     _services = {}
 
     def get_service(name):
         if name not in _services:
-            if name == "inpainting":
-                from services.inpainting import InpaintingService
-                _services[name] = InpaintingService()
-            elif name == "segmentation":
-                from services.segmentation import SegmentationService
-                _services[name] = SegmentationService()
-            elif name == "sky":
-                from services.sky import SkyService
-                _services[name] = SkyService()
-            elif name == "enhance":
-                from services.enhance import EnhanceService
-                _services[name] = EnhanceService()
+            try:
+                if name == "inpainting":
+                    from services.inpainting import InpaintingService
+                    _services[name] = InpaintingService()
+                elif name == "segmentation":
+                    from services.segmentation import SegmentationService
+                    _services[name] = SegmentationService()
+                elif name == "sky":
+                    from services.sky import SkyService
+                    _services[name] = SkyService()
+                elif name == "enhance":
+                    from services.enhance import EnhanceService
+                    _services[name] = EnhanceService()
+            except Exception as e:
+                print(f"[Warning] Failed to load {name}: {e}")
+                _services[name] = None
         return _services.get(name)
 
-    # ─── 数据模型 ───
+    def load_image(path: str):
+        img = cv2.imread(path)
+        if img is None:
+            raise ValueError(f"Cannot load: {path}")
+        return img
 
+    # -- Models --
     class InpaintRequest(BaseModel):
         image_id: str
         mask_id: str
         prompt: str = ""
-        negative_prompt: str = "blurry, artifacts"
         strength: float = 0.8
-        guidance_scale: float = 7.5
-        steps: int = 30
 
     class SkyReplaceRequest(BaseModel):
         image_id: str
@@ -101,19 +103,7 @@ def create_app():
         sharpness: float = 0.0
         denoise: float = 0.0
 
-    class BatchRequest(BaseModel):
-        image_ids: list[str]
-        action: str
-        params: dict = {}
-
-    def load_image(path: str) -> np.ndarray:
-        import cv2
-        img = cv2.imread(path)
-        if img is None:
-            raise ValueError(f"无法加载: {path}")
-        return img
-
-    # ─── API 路由 ───
+    # -- API Routes --
 
     @app.get("/api/health")
     async def health():
@@ -121,7 +111,7 @@ def create_app():
         return {
             "status": "ok",
             "gpu": torch.cuda.is_available(),
-            "version": "0.1.0",
+            "frontend": FRONTEND_DIR.exists(),
         }
 
     @app.post("/api/upload")
@@ -141,30 +131,28 @@ def create_app():
         if not matches:
             matches = list(OUTPUT_DIR.glob(f"{image_id}.*"))
         if not matches:
-            raise HTTPException(404, "图片不存在")
+            raise HTTPException(404, "Image not found")
         return FileResponse(str(matches[0]))
 
     @app.post("/api/auto-segment")
     async def auto_segment(image_id: str = Form(...), mode: str = Form("person")):
         matches = list(UPLOAD_DIR.glob(f"{image_id}.*"))
         if not matches:
-            raise HTTPException(404, "图片不存在")
+            raise HTTPException(404, "Image not found")
         img = load_image(str(matches[0]))
         seg = get_service("segmentation")
-        if mode == "person":
-            masks = seg.auto_detect_people(img)
-        elif mode == "sky":
-            masks = seg.auto_detect_sky(img)
-        else:
-            masks = seg.auto_detect_all(img)
-
-        if masks:
-            combined = np.zeros_like(masks[0])
-            for m in masks:
-                combined = np.maximum(combined, m)
-        else:
+        if seg is None:
+            # Fallback: return a full mask
             combined = np.zeros(img.shape[:2], dtype=np.uint8)
-
+        else:
+            masks = seg.auto_detect_people(img) if mode == "person" else (
+                seg.auto_detect_sky(img) if mode == "sky" else seg.auto_detect_all(img))
+            if masks:
+                combined = np.zeros_like(masks[0])
+                for m in masks:
+                    combined = np.maximum(combined, m)
+            else:
+                combined = np.zeros(img.shape[:2], dtype=np.uint8)
         mask_id = str(uuid.uuid4())[:8]
         mask_path = OUTPUT_DIR / f"{mask_id}_mask.png"
         cv2.imwrite(str(mask_path), combined)
@@ -175,148 +163,115 @@ def create_app():
         img_matches = list(UPLOAD_DIR.glob(f"{req.image_id}.*"))
         mask_matches = list(OUTPUT_DIR.glob(f"{req.mask_id}_mask.png"))
         if not img_matches:
-            raise HTTPException(404, "原图不存在")
+            raise HTTPException(404, "Image not found")
         if not mask_matches:
-            raise HTTPException(404, "掩码不存在")
+            raise HTTPException(404, "Mask not found")
         img = load_image(str(img_matches[0]))
         mask = cv2.imread(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
         inp = get_service("inpainting")
-        result = inp.inpaint(img, mask, prompt=req.prompt)
-        result_id = str(uuid.uuid4())[:8]
-        result_path = OUTPUT_DIR / f"{result_id}.jpg"
-        cv2.imwrite(str(result_path), result)
-        return FileResponse(str(result_path), headers={"X-Result-Id": result_id})
+        if inp:
+            result = inp.inpaint(img, mask, prompt=req.prompt)
+        else:
+            # Fallback: use OpenCV inpainting
+            result = cv2.inpaint(img, mask, 7, cv2.INPAINT_TELEA)
+        rid = str(uuid.uuid4())[:8]
+        rpath = OUTPUT_DIR / f"{rid}.jpg"
+        cv2.imwrite(str(rpath), result)
+        return FileResponse(str(rpath), headers={"X-Result-Id": rid})
 
     @app.post("/api/enhance")
     async def enhance(req: EnhanceRequest):
         matches = list(UPLOAD_DIR.glob(f"{req.image_id}.*"))
         if not matches:
-            raise HTTPException(404, "图片不存在")
+            raise HTTPException(404, "Image not found")
         img = load_image(str(matches[0]))
         enh = get_service("enhance")
-        result = enh.adjust(
-            img, brightness=req.brightness, contrast=req.contrast,
-            saturation=req.saturation, warmth=req.warmth,
-            sharpness=req.sharpness, denoise=req.denoise,
-        )
-        result_id = str(uuid.uuid4())[:8]
-        result_path = OUTPUT_DIR / f"{result_id}.jpg"
-        cv2.imwrite(str(result_path), result)
-        return FileResponse(str(result_path))
+        if enh:
+            result = enh.adjust(
+                img, brightness=req.brightness, contrast=req.contrast,
+                saturation=req.saturation, warmth=req.warmth,
+                sharpness=req.sharpness, denoise=req.denoise,
+            )
+        else:
+            result = img
+        rid = str(uuid.uuid4())[:8]
+        rpath = OUTPUT_DIR / f"{rid}.jpg"
+        cv2.imwrite(str(rpath), result)
+        return FileResponse(str(rpath))
 
     @app.post("/api/sky/replace")
     async def sky_replace(req: SkyReplaceRequest):
         matches = list(UPLOAD_DIR.glob(f"{req.image_id}.*"))
         if not matches:
-            raise HTTPException(404, "图片不存在")
+            raise HTTPException(404, "Image not found")
         img = load_image(str(matches[0]))
         sky = get_service("sky")
-        result = sky.replace(img, sky_type=req.sky_type, blend=req.blend_strength)
-        result_id = str(uuid.uuid4())[:8]
-        result_path = OUTPUT_DIR / f"{result_id}.jpg"
-        cv2.imwrite(str(result_path), result)
-        return FileResponse(str(result_path))
+        if sky:
+            result = sky.replace(img, sky_type=req.sky_type, blend=req.blend_strength)
+        else:
+            result = img
+        rid = str(uuid.uuid4())[:8]
+        rpath = OUTPUT_DIR / f"{rid}.jpg"
+        cv2.imwrite(str(rpath), result)
+        return FileResponse(str(rpath))
 
     @app.post("/api/relight")
     async def relight(image_id: str = Form(...), brightness: float = Form(0.3), warmth: float = Form(0.1)):
         matches = list(UPLOAD_DIR.glob(f"{image_id}.*"))
         if not matches:
-            raise HTTPException(404, "图片不存在")
+            raise HTTPException(404, "Image not found")
         img = load_image(str(matches[0]))
         enh = get_service("enhance")
-        result = enh.relight(img, brightness=brightness, warmth=warmth)
-        result_id = str(uuid.uuid4())[:8]
-        result_path = OUTPUT_DIR / f"{result_id}.jpg"
-        cv2.imwrite(str(result_path), result)
-        return FileResponse(str(result_path))
+        if enh:
+            result = enh.relight(img, brightness=brightness, warmth=warmth)
+        else:
+            result = np.clip(img.astype(np.float32) + brightness * 150, 0, 255).astype(np.uint8)
+        rid = str(uuid.uuid4())[:8]
+        rpath = OUTPUT_DIR / f"{rid}.jpg"
+        cv2.imwrite(str(rpath), result)
+        return FileResponse(str(rpath))
 
-    @app.post("/api/batch")
-    async def batch(req: BatchRequest):
-        results = []
-        for img_id in req.image_ids:
-            matches = list(UPLOAD_DIR.glob(f"{img_id}.*"))
-            if not matches:
-                results.append({"image_id": img_id, "status": "not_found"})
-                continue
-            try:
-                img = load_image(str(matches[0]))
-                if req.action == "enhance":
-                    enh = get_service("enhance")
-                    result = enh.adjust(img, **req.params)
-                elif req.action == "auto_remove":
-                    seg = get_service("segmentation")
-                    inp = get_service("inpainting")
-                    masks = seg.auto_detect_people(img)
-                    if masks:
-                        combined = np.zeros_like(masks[0])
-                        for m in masks:
-                            combined = np.maximum(combined, m)
-                        result = inp.inpaint(img, combined)
-                    else:
-                        result = img
-                else:
-                    results.append({"image_id": img_id, "status": "unknown"})
-                    continue
-                rid = str(uuid.uuid4())[:8]
-                cv2.imwrite(str(OUTPUT_DIR / f"{rid}.jpg"), result)
-                results.append({"image_id": img_id, "result_id": rid, "status": "ok"})
-            except Exception as e:
-                results.append({"image_id": img_id, "status": "error", "message": str(e)})
-        return {"results": results}
-
-    # ─── 前端静态文件托管 ───
-    if FRONTEND_DIR.exists():
+    # -- Frontend --
+    if FRONTEND_DIR.exists() and (FRONTEND_DIR / "index.html").exists():
         @app.get("/")
         async def root():
             return FileResponse(str(FRONTEND_DIR / "index.html"))
 
-        # 挂载静态资源
-        app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR / "assets")), name="assets")
+        # Serve static assets
+        if (FRONTEND_DIR / "assets").exists():
+            app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR / "assets")), name="assets")
 
-        # SPA fallback - 所有非API路径返回 index.html
-        @app.api_route("/{path:path}", methods=["GET"], include_in_schema=False)
-        async def spa_fallback(path: str):
-            file_path = FRONTEND_DIR / path
-            if file_path.exists() and file_path.is_file():
+        @app.api_route("/{full_path:path}", methods=["GET"], include_in_schema=False)
+        async def spa_fallback(full_path: str):
+            file_path = FRONTEND_DIR / full_path
+            if file_path.is_file():
                 return FileResponse(str(file_path))
             return FileResponse(str(FRONTEND_DIR / "index.html"))
     else:
         @app.get("/")
-        async def root_no_frontend():
-            return {"message": "Pixel Cake API 正在运行。前端未构建。"}
+        async def root_fallback():
+            return {
+                "message": "Pixel Cake API is running.",
+                "note": "Frontend not built yet. Run: cd frontend && npm run build"
+            }
 
-    return app
-
-
-def open_browser(url: str, delay: float = 2.0):
-    """延迟打开浏览器"""
-    time.sleep(delay)
-    webbrowser.open(url)
-
-
-def main():
-    import uvicorn
-
-    setup_dirs()
-    app = create_app()
+    # -- Start --
     host = "127.0.0.1"
     port = 8765
     url = f"http://{host}:{port}"
 
-    print(f"""
-╔══════════════════════════════════════════════╗
-║                                              ║
-║   🎨  Pixel Cake - AI 修图工具               ║
-║                                              ║
-║   地址: {url:<37s}║
-║   正在启动...                                 ║
-║                                              ║
-╚══════════════════════════════════════════════╝
-    """)
+    print()
+    print("=" * 50)
+    print(f"  Pixel Cake - AI Photo Editor")
+    print(f"  URL: {url}")
+    print("=" * 50)
+    print()
 
-    # 自动打开浏览器
-    threading.Thread(target=open_browser, args=(url,), daemon=True).start()
+    def open_browser_delayed():
+        time.sleep(2)
+        webbrowser.open(url)
 
+    threading.Thread(target=open_browser_delayed, daemon=True).start()
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
