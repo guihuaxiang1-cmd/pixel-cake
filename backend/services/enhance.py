@@ -455,16 +455,23 @@ class EnhanceService:
         if skin_mask is None:
             skin_mask = self._detect_skin(image)
 
+        # FIX: If no skin detected, apply smoothing to entire image for visible effect
+        has_skin = cv2.countNonZero(skin_mask) > (image.shape[0] * image.shape[1] * 0.01)
+        if not has_skin:
+            # No skin found - apply to full image with gentler params
+            full_mask = np.ones(image.shape[:2], dtype=np.uint8) * 255
+            skin_mask = full_mask
+
         result = image.copy()
 
         # 皮肤区域处理
         skin_region = cv2.bitwise_and(image, image, mask=skin_mask)
 
         # 1. 分离高频（纹理）和低频（颜色/光影）
-        # 使用双边滤波保边平滑
-        d = int(strength * 15) * 2 + 1
-        sigma_color = strength * 100 + 50
-        sigma_space = strength * 100 + 50
+        # 使用双边滤波保边平滑 - more aggressive params
+        d = int(strength * 20) * 2 + 1
+        sigma_color = strength * 120 + 60
+        sigma_space = strength * 120 + 60
         smooth = cv2.bilateralFilter(skin_region, d, sigma_color, sigma_space)
 
         # 2. 提取纹理层
@@ -472,13 +479,13 @@ class EnhanceService:
 
         # 3. 中性灰处理：消除色差和不均匀
         # 高斯模糊获取大尺度光影
-        large_scale = cv2.GaussianBlur(smooth, (0, 0), 20)
+        large_scale = cv2.GaussianBlur(smooth, (0, 0), 25)
 
         # 分离光影和颜色
         detail = cv2.subtract(smooth, large_scale)
 
         # 去除细节层中的瑕疵（小面积高对比区域）
-        detail_blur = cv2.GaussianBlur(detail.astype(np.float32), (5, 5), 0)
+        detail_blur = cv2.GaussianBlur(detail.astype(np.float32), (7, 7), 0)
         detail_cleaned = cv2.addWeighted(detail.astype(np.float32), preserve_texture,
                                           detail_blur, 1 - preserve_texture, 0)
 
@@ -503,20 +510,25 @@ class EnhanceService:
         return result.clip(0, 255).astype(np.uint8)
 
     def _detect_skin(self, image: np.ndarray) -> np.ndarray:
-        """肤色检测"""
-        # YCrCb 空间检测
+        """肤色检测 - 支持多种肤色"""
+        # YCrCb 空间检测 - broader range for various skin tones
         ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
-        lower = np.array([0, 133, 77])
-        upper = np.array([255, 173, 127])
+        lower = np.array([0, 125, 70])
+        upper = np.array([255, 180, 135])
         mask1 = cv2.inRange(ycrcb, lower, upper)
 
-        # HSV 空间辅助检测
+        # HSV 空间辅助检测 - broader range
         hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        lower2 = np.array([0, 20, 70])
-        upper2 = np.array([20, 255, 255])
+        lower2 = np.array([0, 15, 50])
+        upper2 = np.array([25, 255, 255])
         mask2 = cv2.inRange(hsv, lower2, upper2)
+        # Also catch lighter skin (higher hue range)
+        lower3 = np.array([160, 15, 50])
+        upper3 = np.array([180, 255, 255])
+        mask3 = cv2.inRange(hsv, lower3, upper3)
 
         mask = np.maximum(mask1, mask2)
+        mask = np.maximum(mask, mask3)
 
         # 形态学清理
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))

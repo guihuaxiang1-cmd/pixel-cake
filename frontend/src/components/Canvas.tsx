@@ -36,6 +36,10 @@ export default function Canvas({
   const [panStart, setPanStart] = useState<{ x: number; y: number; panX: number; panY: number } | null>(null)
   const [hasDrawn, setHasDrawn] = useState(false)
   const [imgLoaded, setImgLoaded] = useState(false)
+  // 裁剪状态
+  const [cropStart, setCropStart] = useState<{ x: number; y: number } | null>(null)
+  const [cropRect, setCropRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null)
+  const [isCropping, setIsCropping] = useState(false)
 
   // 加载图片到底层画布
   useEffect(() => {
@@ -60,10 +64,15 @@ export default function Canvas({
     overlayRef.current.height = canvasRef.current.height
   }, [imgLoaded])
 
-  // 切换工具时清空画笔
+  // 切换工具时清空画笔/裁剪
   useEffect(() => {
     if (tool !== 'brush' && tool !== 'eraser' && tool !== 'inpaint') {
       clearOverlay()
+    }
+    if (tool !== 'crop') {
+      setCropRect(null)
+      setCropStart(null)
+      setIsCropping(false)
     }
   }, [tool])
 
@@ -150,9 +159,14 @@ export default function Canvas({
         return
       }
 
-      // 裁剪 - 提示未实现
+      // 裁剪 - 开始选择区域
       if (tool === 'crop') {
-        onError('裁剪功能即将上线，敬请期待')
+        const coords = getCanvasCoords(e)
+        if (coords) {
+          setCropStart(coords)
+          setCropRect(null)
+          setIsCropping(true)
+        }
         return
       }
 
@@ -179,6 +193,20 @@ export default function Canvas({
         return
       }
 
+      // 裁剪拖拽
+      if (isCropping && cropStart) {
+        const coords = getCanvasCoords(e)
+        if (coords) {
+          setCropRect({
+            x: Math.min(cropStart.x, coords.x),
+            y: Math.min(cropStart.y, coords.y),
+            w: Math.abs(coords.x - cropStart.x),
+            h: Math.abs(coords.y - cropStart.y),
+          })
+        }
+        return
+      }
+
       if (!isDrawing) return
       const coords = getCanvasCoords(e)
       if (coords) {
@@ -191,7 +219,10 @@ export default function Canvas({
   const handleMouseUp = useCallback(() => {
     setIsDrawing(false)
     setPanStart(null)
-  }, [])
+    if (isCropping) {
+      setIsCropping(false)
+    }
+  }, [isCropping])
 
   // 在覆盖层上绘制
   const drawBrush = useCallback(
@@ -223,6 +254,54 @@ export default function Canvas({
     [zoom, onZoomChange]
   )
 
+  // 应用裁剪
+  const applyCrop = useCallback(async () => {
+    if (!canvasRef.current || !cropRect || cropRect.w < 10 || cropRect.h < 10 || !image) return
+    const src = canvasRef.current
+    const cropped = document.createElement('canvas')
+    cropped.width = cropRect.w
+    cropped.height = cropRect.h
+    const ctx = cropped.getContext('2d')!
+    ctx.drawImage(src, cropRect.x, cropRect.y, cropRect.w, cropRect.h, 0, 0, cropRect.w, cropRect.h)
+
+    cropped.toBlob(async (blob) => {
+      if (!blob) return
+      try {
+        // Upload cropped image as new image
+        const fd = new FormData()
+        fd.append('file', blob, 'cropped.png')
+        const res = await fetch('/api/upload', { method: 'POST', body: fd })
+        if (res.ok) {
+          const data = await res.json()
+          // Update canvas with cropped image
+          const url = URL.createObjectURL(blob)
+          const img = new Image()
+          img.onload = () => {
+            if (canvasRef.current) {
+              canvasRef.current.width = img.width
+              canvasRef.current.height = img.height
+              canvasRef.current.getContext('2d')!.drawImage(img, 0, 0)
+            }
+            if (overlayRef.current) {
+              overlayRef.current.width = img.width
+              overlayRef.current.height = img.height
+            }
+            setCropRect(null)
+            setCropStart(null)
+          }
+          img.src = url
+        }
+      } catch (err) {
+        console.error('Crop failed:', err)
+      }
+    }, 'image/png')
+  }, [cropRect, image])
+
+  const cancelCrop = useCallback(() => {
+    setCropRect(null)
+    setCropStart(null)
+  }, [])
+
   const cursorMap: Record<Tool, string> = {
     select: 'default',
     hand: 'grab',
@@ -234,7 +313,7 @@ export default function Canvas({
     crop: 'crosshair',
   }
 
-  const showInpaintButton = hasDrawn && (tool === 'brush' || tool === 'inpaint')
+  const showInpaintButton = hasDrawn && (tool === 'brush' || tool === 'inpaint' || tool === 'eraser')
   const isAIClickTool = tool === 'auto-person' || tool === 'auto-sky'
 
   return (
@@ -299,6 +378,50 @@ export default function Canvas({
           <div className="px-5 py-2.5 rounded-xl bg-dark-800/90 text-dark-200 text-sm shadow-lg backdrop-blur-sm border border-dark-600">
             {tool === 'auto-person' && '👆 点击图片，AI 自动识别并去除路人'}
             {tool === 'auto-sky' && '👆 点击图片，AI 自动替换天空'}
+          </div>
+        </div>
+      )}
+
+      {/* 裁剪选区遮罩 */}
+      {cropRect && tool === 'crop' && (
+        <>
+          {/* 半透明遮罩 */}
+          <div className="absolute inset-0 pointer-events-none z-30" style={{
+            background: `linear-gradient(to right, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.5) ${(cropRect.x * zoom + pan.x)}px, transparent ${(cropRect.x * zoom + pan.x)}px, transparent ${(cropRect.x + cropRect.w) * zoom + pan.x}px, rgba(0,0,0,0.5) ${(cropRect.x + cropRect.w) * zoom + pan.x}px)`,
+          }} />
+          {/* 选区边框 */}
+          <div className="absolute pointer-events-none z-30 border-2 border-white shadow-lg"
+            style={{
+              left: `${cropRect.x * zoom + pan.x}px`,
+              top: `${cropRect.y * zoom + pan.y}px`,
+              width: `${cropRect.w * zoom}px`,
+              height: `${cropRect.h * zoom}px`,
+            }}
+          >
+            {/* 尺寸标注 */}
+            <div className="absolute -top-6 left-1/2 -translate-x-1/2 px-2 py-0.5 bg-dark-950/80 rounded text-xs text-white whitespace-nowrap">
+              {cropRect.w} × {cropRect.h}
+            </div>
+          </div>
+          {/* 确认/取消按钮 */}
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex gap-3 animate-fadeIn">
+            <button onClick={applyCrop}
+              className="px-6 py-2.5 rounded-xl bg-green-600 hover:bg-green-500 text-white font-medium text-sm shadow-lg transition-all hover:scale-105">
+              ✓ 确认裁剪
+            </button>
+            <button onClick={cancelCrop}
+              className="px-4 py-2.5 rounded-xl bg-dark-700 hover:bg-dark-600 text-dark-200 text-sm shadow-lg transition-all">
+              ✕ 取消
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* 裁剪模式提示 */}
+      {tool === 'crop' && image && !cropRect && !isCropping && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 animate-fadeIn">
+          <div className="px-5 py-2.5 rounded-xl bg-dark-800/90 text-dark-200 text-sm shadow-lg backdrop-blur-sm border border-dark-600">
+            ✂️ 拖拽选择裁剪区域
           </div>
         </div>
       )}
