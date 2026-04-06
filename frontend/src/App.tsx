@@ -40,8 +40,11 @@ export type AIFeature =
   | 'fill-grass'
   | 'sky-replace'
   | 'skin-smooth'
-  | 'teeth-whiten'   // FIX: added
+  | 'teeth-whiten'
   | 'color-match'
+  | 'face-slim'
+  | 'hair-smooth'
+  | 'makeup'
 
 export type AdjustMode = 'basic' | 'color' | 'detail' | 'filter' | 'ai'
 
@@ -264,22 +267,43 @@ export default function App() {
           }
           break
         }
-        case 'color-match': {
-          const res = await fetch('/api/enhance', {
+        case 'face-slim': {
+          const fd = new FormData()
+          fd.append('image_id', image.imageId)
+          fd.append('strength', '0.3')
+          const res = await fetch('/api/face-slim', { method: 'POST', body: fd })
+          if (!res.ok) throw new Error(`瘦脸失败 (${res.status})`)
+          blob = await res.blob()
+          break
+        }
+        case 'hair-smooth': {
+          const fd = new FormData()
+          fd.append('image_id', image.imageId)
+          fd.append('strength', '0.5')
+          const res = await fetch('/api/hair-smooth', { method: 'POST', body: fd })
+          if (!res.ok) throw new Error(`发丝处理失败 (${res.status})`)
+          blob = await res.blob()
+          break
+        }
+        case 'makeup': {
+          // Default subtle makeup
+          const res = await fetch('/api/makeup', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               image_id: image.imageId,
-              brightness: 0.05,
-              contrast: 0.1,
-              saturation: 0.08,
-              warmth: 0.05,
-              sharpness: 0.1,
-              denoise: 0.1,
+              lipstick: 0.4,
+              blush: 0.3,
+              eyeshadow: 0.2,
             }),
           })
-          if (!res.ok) throw new Error(`追色失败 (${res.status})`)
+          if (!res.ok) throw new Error(`妆容失败 (${res.status})`)
           blob = await res.blob()
+          break
+        }
+        case 'color-match': {
+          // Need a reference image — show toast asking user to use the panel
+          showToast('请在右侧「色彩」面板使用 AI 追色功能（导入参考图）', 'info')
           break
         }
       }
@@ -297,6 +321,106 @@ export default function App() {
       console.error('AI处理失败:', err)
       // FIX: User-visible error message
       showToast(`AI 处理失败: ${err.message || '未知错误'}`, 'error')
+    } finally {
+      setIsProcessing(false)
+    }
+  }, [image, historyIndex])
+
+  // ─── AI 追色 2.0（参考图） ───
+
+  const handleColorMatch = useCallback(async (refFile: File) => {
+    if (!image) return
+    setIsProcessing(true)
+    showToast(null, 'error')
+    try {
+      const fd = new FormData()
+      fd.append('image_id', image.imageId)
+      fd.append('reference', refFile)
+      const res = await fetch('/api/color-match', { method: 'POST', body: fd })
+      if (!res.ok) throw new Error(`追色失败 (${res.status})`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      setResultUrl(url)
+      setHistory(prev => [...prev.slice(0, historyIndex + 1), url])
+      setHistoryIndex(prev => prev + 1)
+    } catch (err: any) {
+      console.error('追色失败:', err)
+      showToast(`追色失败: ${err.message}`, 'error')
+    } finally {
+      setIsProcessing(false)
+    }
+  }, [image, historyIndex])
+
+  // ─── 局部调色（主体/背景） ───
+
+  const handleLocalAdjust = useCallback(async (mode: 'subject' | 'background', adj: { brightness?: number; contrast?: number; saturation?: number; warmth?: number }) => {
+    if (!image) return
+    setIsProcessing(true)
+    showToast(null, 'error')
+    try {
+      // 1. 分割得到 mask
+      const segMode = mode === 'subject' ? 'person' : 'all'
+      const segRes = await fetch('/api/auto-segment', {
+        method: 'POST',
+        body: new URLSearchParams({ image_id: image.imageId, mode: segMode }),
+      })
+      if (!segRes.ok) throw new Error(`分割失败 (${segRes.status})`)
+      const maskId = segRes.headers.get('X-Mask-Id')
+      if (!maskId) throw new Error('未获取到掩码')
+
+      // 2. 调用 local-adjust
+      const res = await fetch('/api/local-adjust', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_id: image.imageId,
+          mask_id: maskId,
+          brightness: adj.brightness ?? 0,
+          contrast: adj.contrast ?? 0,
+          saturation: adj.saturation ?? 0,
+          warmth: adj.warmth ?? 0,
+        }),
+      })
+      if (!res.ok) throw new Error(`局部调色失败 (${res.status})`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      setResultUrl(url)
+      setHistory(prev => [...prev.slice(0, historyIndex + 1), url])
+      setHistoryIndex(prev => prev + 1)
+    } catch (err: any) {
+      console.error('局部调色失败:', err)
+      showToast(`局部调色失败: ${err.message}`, 'error')
+    } finally {
+      setIsProcessing(false)
+    }
+  }, [image, historyIndex])
+
+  // ─── 妆容自定义 ───
+
+  const handleMakeupCustom = useCallback(async (opts: { lipstick?: number; blush?: number; eyeshadow?: number }) => {
+    if (!image) return
+    setIsProcessing(true)
+    showToast(null, 'error')
+    try {
+      const res = await fetch('/api/makeup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_id: image.imageId,
+          lipstick: opts.lipstick ?? 0,
+          blush: opts.blush ?? 0,
+          eyeshadow: opts.eyeshadow ?? 0,
+        }),
+      })
+      if (!res.ok) throw new Error(`妆容失败 (${res.status})`)
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      setResultUrl(url)
+      setHistory(prev => [...prev.slice(0, historyIndex + 1), url])
+      setHistoryIndex(prev => prev + 1)
+    } catch (err: any) {
+      console.error('妆容失败:', err)
+      showToast(`妆容失败: ${err.message}`, 'error')
     } finally {
       setIsProcessing(false)
     }
@@ -567,6 +691,9 @@ export default function App() {
           onFilterIntensityChange={setFilterIntensity}
           isProcessing={isProcessing}
           onShowToast={showToast}
+          onColorMatch={handleColorMatch}
+          onLocalAdjust={handleLocalAdjust}
+          onMakeupCustom={handleMakeupCustom}
         />
       </div>
     </div>

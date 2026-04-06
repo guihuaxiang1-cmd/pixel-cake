@@ -3,6 +3,7 @@ Enhance Service - 图像增强与调色
 包含：调色、磨皮、AI追色、局部调整、滤镜预设
 """
 
+import os
 import numpy as np
 import cv2
 from typing import Optional
@@ -554,5 +555,298 @@ class EnhanceService:
         # 去黄（降低蓝色通道较少的区域的黄色）
         result[:, :, 2] -= mask_norm * strength * 20  # 降低红(黄色分量)
         result[:, :, 1] += mask_norm * strength * 5   # 微增绿
+
+        return result.clip(0, 255).astype(np.uint8)
+
+    # ──────────────────────────────────────────
+    # 3D 美型（瘦脸）
+    # ──────────────────────────────────────────
+
+    def face_slim(self, image: np.ndarray, strength: float = 0.3) -> np.ndarray:
+        """
+        3D 美型 - 瘦脸效果
+        
+        使用 OpenCV Haar Cascade 检测人脸，通过水平方向的
+        局部缩放（向前挤压）实现瘦脸效果。
+        
+        Args:
+            image: 输入图像
+            strength: 瘦脸强度 0-1（0.3为自然效果）
+        """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        h, w = image.shape[:2]
+
+        # 加载人脸检测器
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        if not os.path.exists(cascade_path):
+            # Fallback: try alt2
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_alt2.xml"
+        if not os.path.exists(cascade_path):
+            return image  # No cascade available
+
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
+
+        if len(faces) == 0:
+            return image
+
+        result = image.copy()
+
+        for (fx, fy, fw, fh) in faces:
+            # 计算瘦脸区域（脸颊两侧）
+            # 从人脸中心向两侧，应用水平方向的挤压变形
+            cx = fx + fw // 2
+            cy = fy + fh // 2
+
+            # 瘦脸只影响脸颊区域（人脸下半部分的两侧）
+            cheek_top = fy + int(fh * 0.35)
+            cheek_bot = fy + int(fh * 0.85)
+            cheek_left = fx
+            cheek_right = fx + fw
+
+            # 挤压量
+            squeeze = int(fw * strength * 0.15)
+
+            # 对左脸颊：从外向内挤压
+            for y in range(max(0, cheek_top), min(h, cheek_bot)):
+                # 计算当前行的挤压比例（中间挤压多，边缘少）
+                row_t = (y - cheek_top) / max(1, cheek_bot - cheek_top)
+                # 钟形曲线：中间最大
+                bell = np.sin(row_t * np.pi)
+                row_squeeze = int(squeeze * bell)
+
+                if row_squeeze <= 0:
+                    continue
+
+                # 左侧：从 cheek_left 到 cx 挤压
+                left_start = max(0, cheek_left)
+                left_end = min(w, cx)
+                left_width = left_end - left_start
+                if left_width > row_squeeze * 2:
+                    # 提取左半行
+                    row_data = result[y, left_start:left_end].copy()
+                    # 创建新的压缩行
+                    for x in range(left_width):
+                        # 映射到原始位置（向右偏移）
+                        src_x = min(x + int(row_squeeze * (1 - x / left_width)), left_width - 1)
+                        result[y, left_start + x] = row_data[src_x]
+
+                # 右侧：从 cx 到 cheek_right 挤压
+                right_start = min(w, cx)
+                right_end = min(w, cheek_right)
+                right_width = right_end - right_start
+                if right_width > row_squeeze * 2:
+                    row_data = result[y, right_start:right_end].copy()
+                    for x in range(right_width):
+                        src_x = max(x - int(row_squeeze * (x / right_width)), 0)
+                        result[y, right_start + x] = row_data[min(src_x, right_width - 1)]
+
+        # 轻微平滑消除接缝
+        result = cv2.bilateralFilter(result, 5, 50, 50)
+
+        return result
+
+    # ──────────────────────────────────────────
+    # 发丝处理（祛碎发）
+    # ──────────────────────────────────────────
+
+    def hair_smooth(self, image: np.ndarray, strength: float = 0.5) -> np.ndarray:
+        """
+        发丝处理 - 祛碎发/毛躁发丝
+        
+        通过检测高对比度的细小发丝区域（边缘密集且颜色与周围差异大），
+        使用方向性滤波平滑处理。
+        
+        Args:
+            image: 输入图像
+            strength: 处理强度 0-1
+        """
+        h, w = image.shape[:2]
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # 1. 检测可能的碎发区域
+        # 高频边缘区域（发丝很细，边缘密度高）
+        edges = cv2.Canny(gray, 30, 100)
+
+        # 膨胀边缘以覆盖发丝周围
+        kernel_dilate = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        edges_dilated = cv2.dilate(edges, kernel_dilate, iterations=2)
+
+        # 2. 检测头发颜色区域（深色、低饱和度或高饱和度染发）
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+        # 深色头发
+        dark_hair = cv2.inRange(gray, 0, 80)
+        # 金色/棕色头发
+        warm_hair = cv2.inRange(hsv, np.array([10, 20, 50]), np.array([30, 255, 200]))
+        # 黑色区域
+        black_hair = cv2.inRange(gray, 0, 50)
+
+        hair_mask = np.maximum(dark_hair, warm_hair)
+        hair_mask = np.maximum(hair_mask, black_hair)
+
+        # 3. 碎发 = 边缘在头发区域内的细小区域
+        flyaway = cv2.bitwise_and(edges_dilated, hair_mask)
+
+        # 4. 只保留小面积连通区域（碎发是细小的）
+        n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(flyaway)
+        flyaway_clean = np.zeros_like(flyaway)
+        for i in range(1, n_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            aspect = stats[i, cv2.CC_STAT_WIDTH] / max(1, stats[i, cv2.CC_STAT_HEIGHT])
+            # 碎发特征：小面积 或 细长形状
+            if area < (h * w * 0.005) or aspect > 4 or aspect < 0.25:
+                flyaway_clean[labels == i] = 255
+
+        if cv2.countNonZero(flyaway_clean) == 0:
+            return image
+
+        # 5. 对碎发区域应用方向性模糊
+        # 形态学闭运算填充
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        flyaway_mask = cv2.morphologyEx(flyaway_clean, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+
+        # 高斯模糊（平滑碎发）
+        blur_size = int(strength * 20) * 2 + 3
+        blurred = cv2.GaussianBlur(image, (blur_size, blur_size), 0)
+
+        # 6. 只在碎发区域混合
+        mask_3ch = np.stack([flyaway_mask.astype(np.float32) / 255.0 * strength] * 3, axis=-1)
+        result = image.astype(np.float32) * (1 - mask_3ch) + blurred.astype(np.float32) * mask_3ch
+
+        return result.clip(0, 255).astype(np.uint8)
+
+    # ──────────────────────────────────────────
+    # 妆容调整
+    # ──────────────────────────────────────────
+
+    def apply_makeup(
+        self,
+        image: np.ndarray,
+        lipstick: float = 0.0,     # 口红 0-1
+        blush: float = 0.0,        # 腮红 0-1
+        eyeshadow: float = 0.0,    # 眼影 0-1
+        lip_color: tuple = (0, 0, 200),  # BGR 唇色
+        blush_color: tuple = (100, 100, 230),  # BGR 腮红色
+        eyeshadow_color: tuple = (120, 50, 50),  # BGR 眼影色
+    ) -> np.ndarray:
+        """
+        妆容调整 - 基于人脸关键点的化妆效果
+        
+        使用 Haar Cascade 检测人脸五官位置，
+        在对应区域叠加颜色效果。
+        
+        Args:
+            image: 输入图像 (BGR)
+            lipstick: 口红强度 0-1
+            blush: 腮红强度 0-1
+            eyeshadow: 眼影强度 0-1
+            lip_color: 口红颜色 (B, G, R)
+            blush_color: 腮红颜色 (B, G, R)
+            eyeshadow_color: 眼影颜色 (B, G, R)
+        """
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        h, w = image.shape[:2]
+        result = image.astype(np.float32)
+
+        # 检测人脸
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        if not os.path.exists(cascade_path):
+            return image
+        face_cascade = cv2.CascadeClassifier(cascade_path)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
+
+        if len(faces) == 0:
+            return image
+
+        # 检测眼睛
+        eye_cascade_path = cv2.data.haarcascades + "haarcascade_eye.xml"
+        eye_cascade = cv2.CascadeClassifier(eye_cascade_path) if os.path.exists(eye_cascade_path) else None
+
+        # 检测嘴巴
+        mouth_cascade_path = cv2.data.haarcascades + "haarcascade_smile.xml"
+        mouth_cascade = cv2.CascadeClassifier(mouth_cascade_path) if os.path.exists(mouth_cascade_path) else None
+
+        for (fx, fy, fw, fh) in faces:
+            face_roi_gray = gray[fy:fy+fh, fx:fx+fw]
+
+            # ─── 口红 ───
+            if lipstick > 0:
+                # 嘴巴区域估计：人脸下半部 1/3，水平居中
+                mouth_y1 = fy + int(fh * 0.62)
+                mouth_y2 = fy + int(fh * 0.78)
+                mouth_x1 = fx + int(fw * 0.3)
+                mouth_x2 = fx + int(fw * 0.7)
+
+                # 如果有 smile cascade，尝试精确定位
+                if mouth_cascade is not None:
+                    mouth_region = gray[mouth_y1:mouth_y2, mouth_x1:mouth_x2]
+                    mouths = mouth_cascade.detectMultiScale(mouth_region, 1.3, 10)
+                    if len(mouths) > 0:
+                        mx, my, mw, mh = mouths[0]
+                        mouth_x1 = mouth_x1 + mx
+                        mouth_y1 = mouth_y1 + my
+                        mouth_x2 = mouth_x1 + mw
+                        mouth_y2 = mouth_y1 + mh
+
+                # 创建唇部掩码（椭圆形）
+                lip_mask = np.zeros((h, w), dtype=np.float32)
+                lip_cx = (mouth_x1 + mouth_x2) // 2
+                lip_cy = (mouth_y1 + mouth_y2) // 2
+                lip_rx = (mouth_x2 - mouth_x1) // 2
+                lip_ry = (mouth_y2 - mouth_y1) // 2
+                cv2.ellipse(lip_mask, (lip_cx, lip_cy), (lip_rx, lip_ry), 0, 0, 360, 1.0, -1)
+                lip_mask = cv2.GaussianBlur(lip_mask, (15, 15), 0)
+
+                # 在唇部区域叠加颜色
+                for c in range(3):
+                    result[:, :, c] += lip_mask * lip_color[c] * lipstick * 0.5
+
+            # ─── 腮红 ───
+            if blush > 0:
+                # 腮红区域：脸颊两侧，人脸中部偏下
+                for side in [-1, 1]:  # 左右脸颊
+                    cheek_cx = fx + (fw // 4 if side < 0 else fw * 3 // 4)
+                    cheek_cy = fy + int(fh * 0.55)
+                    cheek_rx = fw // 6
+                    cheek_ry = fh // 8
+
+                    blush_mask = np.zeros((h, w), dtype=np.float32)
+                    cv2.ellipse(blush_mask, (cheek_cx, cheek_cy), (cheek_rx, cheek_ry), 0, 0, 360, 1.0, -1)
+                    blush_mask = cv2.GaussianBlur(blush_mask, (31, 31), 0)
+
+                    for c in range(3):
+                        result[:, :, c] += blush_mask * blush_color[c] * blush * 0.3
+
+            # ─── 眼影 ───
+            if eyeshadow > 0:
+                # 检测眼睛位置
+                if eye_cascade is not None:
+                    face_roi = gray[fy:fy+fh, fx:fx+fw]
+                    eyes = eye_cascade.detectMultiScale(face_roi, 1.1, 5, minSize=(20, 20))
+
+                    for (ex, ey, ew, eh) in eyes:
+                        # 眼影在眼睛上方
+                        eye_cx = fx + ex + ew // 2
+                        eye_cy = fy + ey - eh // 3  # 眼睛上方
+
+                        eye_mask = np.zeros((h, w), dtype=np.float32)
+                        cv2.ellipse(eye_mask, (eye_cx, eye_cy), (ew, eh), 0, 0, 360, 1.0, -1)
+                        eye_mask = cv2.GaussianBlur(eye_mask, (21, 21), 0)
+
+                        for c in range(3):
+                            result[:, :, c] += eye_mask * eyeshadow_color[c] * eyeshadow * 0.35
+                else:
+                    # 无 eye cascade，估计眼睛位置
+                    for side in [-1, 1]:
+                        eye_cx = fx + (fw // 3 if side < 0 else fw * 2 // 3)
+                        eye_cy = fy + int(fh * 0.35)
+
+                        eye_mask = np.zeros((h, w), dtype=np.float32)
+                        cv2.ellipse(eye_mask, (eye_cx, eye_cy), (fw // 8, fh // 12), 0, 0, 360, 1.0, -1)
+                        eye_mask = cv2.GaussianBlur(eye_mask, (21, 21), 0)
+
+                        for c in range(3):
+                            result[:, :, c] += eye_mask * eyeshadow_color[c] * eyeshadow * 0.35
 
         return result.clip(0, 255).astype(np.uint8)

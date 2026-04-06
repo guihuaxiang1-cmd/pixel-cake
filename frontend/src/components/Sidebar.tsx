@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useRef } from 'react'
 import { ImageInfo, AdjustMode, AdjustParams, AIFeature } from '../App'
 
 interface SidebarProps {
@@ -14,6 +14,9 @@ interface SidebarProps {
   onFilterIntensityChange: (v: number) => void
   isProcessing: boolean
   onShowToast: (msg: string, type?: 'error' | 'info') => void
+  onColorMatch: (refFile: File) => void
+  onLocalAdjust: (mode: 'subject' | 'background', adj: { brightness?: number; contrast?: number; saturation?: number; warmth?: number }) => void
+  onMakeupCustom: (opts: { lipstick?: number; blush?: number; eyeshadow?: number }) => void
 }
 
 const tabs: Array<{ id: AdjustMode; label: string; icon: string }> = [
@@ -42,6 +45,9 @@ export default function Sidebar({
   onFilterIntensityChange,
   isProcessing,
   onShowToast,
+  onColorMatch,
+  onLocalAdjust,
+  onMakeupCustom,
 }: SidebarProps) {
   return (
     <div className="w-72 bg-dark-900 border-l border-dark-700 flex flex-col shrink-0 overflow-hidden">
@@ -69,17 +75,22 @@ export default function Sidebar({
           <BasicPanel params={params} onChange={onParamsChange} />
         )}
         {mode === 'color' && (
-          <ColorPanel params={params} onChange={onParamsChange} onShowToast={onShowToast} />
+          <ColorPanel
+            params={params}
+            onChange={onParamsChange}
+            onLocalAdjust={onLocalAdjust}
+            hasImage={!!image}
+            isProcessing={isProcessing}
+          />
         )}
         {mode === 'detail' && (
-          // FIX: Pass onAIFeature to DetailPanel so buttons actually work
           <DetailPanel
             params={params}
             onChange={onParamsChange}
             onAIFeature={onAIFeature}
+            onMakeupCustom={onMakeupCustom}
             hasImage={!!image}
             isProcessing={isProcessing}
-            onShowToast={onShowToast}
           />
         )}
         {mode === 'filter' && (
@@ -89,6 +100,9 @@ export default function Sidebar({
             onSelect={onFilterSelect}
             intensity={filterIntensity}
             onIntensityChange={onFilterIntensityChange}
+            onColorMatch={onColorMatch}
+            hasImage={!!image}
+            isProcessing={isProcessing}
           />
         )}
         {mode === 'ai' && (
@@ -130,19 +144,28 @@ function BasicPanel({
   )
 }
 
-// ─── 色彩 ───
+// ─── 色彩 + 局部调色 ───
 
 function ColorPanel({
   params,
   onChange,
-  onShowToast,
+  onLocalAdjust,
+  hasImage,
+  isProcessing,
 }: {
   params: AdjustParams
   onChange: (p: Partial<AdjustParams>) => void
-  onShowToast: (msg: string, type?: 'error' | 'info') => void
+  onLocalAdjust: (mode: 'subject' | 'background', adj: { brightness?: number; contrast?: number; saturation?: number; warmth?: number }) => void
+  hasImage: boolean
+  isProcessing: boolean
 }) {
-  const handleLocalTool = (name: string) => {
-    onShowToast(`${name}局部调色功能即将上线，敬请期待`, 'info')
+  const [localMode, setLocalMode] = useState<'subject' | 'background' | null>(null)
+  const [localAdj, setLocalAdj] = useState({ brightness: 0, contrast: 0, saturation: 0, warmth: 0 })
+
+  const handleApply = () => {
+    if (!localMode) return
+    onLocalAdjust(localMode, localAdj)
+    setLocalMode(null)
   }
 
   return (
@@ -159,35 +182,79 @@ function ColorPanel({
       <div className="pt-2 border-t border-dark-700">
         <h4 className="text-xs text-dark-400 mb-3 font-medium">局部调色</h4>
         <div className="grid grid-cols-3 gap-2">
-          <MiniButton label="主体" icon="👤" onClick={() => handleLocalTool('主体')} />
-          <MiniButton label="背景" icon="🏔️" onClick={() => handleLocalTool('背景')} />
-          <MiniButton label="径向" icon="⭕" onClick={() => handleLocalTool('径向')} />
-          <MiniButton label="线性" icon="📐" onClick={() => handleLocalTool('线性')} />
-          <MiniButton label="画笔" icon="🖌️" onClick={() => handleLocalTool('画笔')} />
-          <MiniButton label="吸管" icon="💧" onClick={() => handleLocalTool('吸管')} />
+          <MiniButton
+            label="主体"
+            icon="👤"
+            active={localMode === 'subject'}
+            onClick={() => setLocalMode(localMode === 'subject' ? null : 'subject')}
+          />
+          <MiniButton
+            label="背景"
+            icon="🏔️"
+            active={localMode === 'background'}
+            onClick={() => setLocalMode(localMode === 'background' ? null : 'background')}
+          />
+          <MiniButton label="径向" icon="⭕" onClick={() => {}} disabled />
+          <MiniButton label="线性" icon="📐" onClick={() => {}} disabled />
+          <MiniButton label="画笔" icon="🖌️" onClick={() => {}} disabled />
+          <MiniButton label="吸管" icon="💧" onClick={() => {}} disabled />
         </div>
+
+        {localMode && (
+          <div className="mt-3 p-3 bg-dark-800 rounded-lg space-y-3 animate-fadeIn">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-dark-200 font-medium">
+                {localMode === 'subject' ? '👤 主体调色' : '🏔️ 背景调色'}
+              </span>
+              <button
+                onClick={() => setLocalMode(null)}
+                className="text-dark-400 hover:text-dark-200 text-xs"
+              >✕</button>
+            </div>
+            <Slider label="亮度" value={localAdj.brightness} min={-1} max={1} step={0.01}
+              onChange={v => setLocalAdj(p => ({ ...p, brightness: v }))} />
+            <Slider label="对比度" value={localAdj.contrast} min={-1} max={1} step={0.01}
+              onChange={v => setLocalAdj(p => ({ ...p, contrast: v }))} />
+            <Slider label="饱和度" value={localAdj.saturation} min={-1} max={1} step={0.01}
+              onChange={v => setLocalAdj(p => ({ ...p, saturation: v }))} />
+            <Slider label="色温" value={localAdj.warmth} min={-1} max={1} step={0.01}
+              onChange={v => setLocalAdj(p => ({ ...p, warmth: v }))} />
+            <button
+              onClick={handleApply}
+              disabled={!hasImage || isProcessing}
+              className="w-full py-2 rounded-lg bg-cake-600 hover:bg-cake-500 disabled:opacity-40 text-sm font-medium transition-colors"
+            >
+              ✨ 应用局部调色
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
 }
 
-// ─── 细节 ───
+// ─── 细节 + 人像精修 + 妆容 ───
 
 function DetailPanel({
   params,
   onChange,
   onAIFeature,
+  onMakeupCustom,
   hasImage,
   isProcessing,
-  onShowToast,
 }: {
   params: AdjustParams
   onChange: (p: Partial<AdjustParams>) => void
   onAIFeature: (f: AIFeature) => void
+  onMakeupCustom: (opts: { lipstick?: number; blush?: number; eyeshadow?: number }) => void
   hasImage: boolean
   isProcessing: boolean
-  onShowToast: (msg: string, type?: 'error' | 'info') => void
 }) {
+  const [showMakeup, setShowMakeup] = useState(false)
+  const [lipstick, setLipstick] = useState(0.4)
+  const [blush, setBlush] = useState(0.3)
+  const [eyeshadow, setEyeshadow] = useState(0.2)
+
   return (
     <div className="space-y-4">
       <Slider label="锐化" value={params.sharpness} min={0} max={1} step={0.01}
@@ -200,7 +267,6 @@ function DetailPanel({
       <div className="pt-2 border-t border-dark-700">
         <h4 className="text-xs text-dark-400 mb-3 font-medium">人像精修</h4>
         <div className="space-y-2">
-          {/* FIX: Wire up buttons to actual API calls */}
           <FeatureButton
             label="中性灰磨皮"
             desc="广告级光影重塑"
@@ -208,12 +274,20 @@ function DetailPanel({
             disabled={!hasImage || isProcessing}
             onClick={() => onAIFeature('skin-smooth')}
           />
-          <FeatureButton label="3D美型" desc="骨骼定位精修" icon="💎"
+          <FeatureButton
+            label="3D美型"
+            desc="骨骼定位精修"
+            icon="💎"
             disabled={!hasImage || isProcessing}
-            onClick={() => onShowToast('3D美型功能即将上线，敬请期待', 'info')} />
-          <FeatureButton label="发丝处理" desc="祛碎发/换发色" icon="💇"
+            onClick={() => onAIFeature('face-slim')}
+          />
+          <FeatureButton
+            label="发丝处理"
+            desc="祛碎发/毛躁发丝"
+            icon="💇"
             disabled={!hasImage || isProcessing}
-            onClick={() => onShowToast('发丝处理功能即将上线，敬请期待', 'info')} />
+            onClick={() => onAIFeature('hair-smooth')}
+          />
           <FeatureButton
             label="牙齿美白"
             desc="自动检测美白"
@@ -221,16 +295,42 @@ function DetailPanel({
             disabled={!hasImage || isProcessing}
             onClick={() => onAIFeature('teeth-whiten')}
           />
-          <FeatureButton label="妆容调整" desc="吸管取色调妆" icon="💄"
+          <FeatureButton
+            label="妆容调整"
+            desc="口红/腮红/眼影"
+            icon="💄"
             disabled={!hasImage || isProcessing}
-            onClick={() => onShowToast('妆容调整功能即将上线，敬请期待', 'info')} />
+            onClick={() => setShowMakeup(!showMakeup)}
+          />
+
+          {showMakeup && (
+            <div className="p-3 bg-dark-800 rounded-lg space-y-3 animate-fadeIn">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-dark-200 font-medium">💄 妆容参数</span>
+                <button onClick={() => setShowMakeup(false)} className="text-dark-400 hover:text-dark-200 text-xs">✕</button>
+              </div>
+              <Slider label="口红" value={lipstick} min={0} max={1} step={0.01}
+                onChange={v => setLipstick(v)} />
+              <Slider label="腮红" value={blush} min={0} max={1} step={0.01}
+                onChange={v => setBlush(v)} />
+              <Slider label="眼影" value={eyeshadow} min={0} max={1} step={0.01}
+                onChange={v => setEyeshadow(v)} />
+              <button
+                onClick={() => onMakeupCustom({ lipstick, blush, eyeshadow })}
+                disabled={!hasImage || isProcessing}
+                className="w-full py-2 rounded-lg bg-cake-600 hover:bg-cake-500 disabled:opacity-40 text-sm font-medium transition-colors"
+              >
+                💄 应用妆容
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
   )
 }
 
-// ─── 滤镜 ───
+// ─── 滤镜 + AI 追色 ───
 
 function FilterPanel({
   filters,
@@ -238,13 +338,27 @@ function FilterPanel({
   onSelect,
   intensity,
   onIntensityChange,
+  onColorMatch,
+  hasImage,
+  isProcessing,
 }: {
   filters: string[]
   selected: string | null
   onSelect: (name: string, intensity?: number) => void
   intensity: number
   onIntensityChange: (v: number) => void
+  onColorMatch: (refFile: File) => void
+  hasImage: boolean
+  isProcessing: boolean
 }) {
+  const refInput = useRef<HTMLInputElement>(null)
+
+  const handleRefFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) onColorMatch(file)
+    e.target.value = ''
+  }
+
   return (
     <div>
       <div className="grid grid-cols-2 gap-2">
@@ -272,8 +386,13 @@ function FilterPanel({
       </div>
 
       <div className="mt-3">
-        <h4 className="text-xs text-dark-400 mb-2 font-medium">AI 追色</h4>
-        <button className="w-full py-2.5 rounded-lg bg-dark-800 hover:bg-dark-700 text-sm text-dark-200 transition-colors">
+        <h4 className="text-xs text-dark-400 mb-2 font-medium">AI 追色 2.0</h4>
+        <input ref={refInput} type="file" accept="image/*" className="hidden" onChange={handleRefFile} />
+        <button
+          onClick={() => refInput.current?.click()}
+          disabled={!hasImage || isProcessing}
+          className="w-full py-2.5 rounded-lg bg-dark-800 hover:bg-dark-700 disabled:opacity-40 text-sm text-dark-200 transition-colors flex items-center justify-center gap-2"
+        >
           📷 导入参考图追色
         </button>
       </div>
@@ -306,8 +425,10 @@ function AIPanel({
     { id: 'fill-grass', icon: '🌿', label: 'AI补草地', desc: '自动生成草地纹理' },
     { id: 'sky-replace', icon: '🌅', label: '换天空', desc: '无缝天空替换' },
     { id: 'skin-smooth', icon: '✨', label: '中性灰磨皮', desc: '保留纹理的磨皮' },
-    // FIX: Add teeth-whiten to AI panel
     { id: 'teeth-whiten', icon: '😁', label: '牙齿美白', desc: '自动检测美白' },
+    { id: 'face-slim', icon: '💎', label: '3D美型', desc: 'AI智能瘦脸' },
+    { id: 'hair-smooth', icon: '💇', label: '发丝处理', desc: '祛碎发/毛躁' },
+    { id: 'makeup', icon: '💄', label: '妆容调整', desc: '口红/腮红/眼影' },
     { id: 'color-match', icon: '🎯', label: 'AI追色 2.0', desc: '光影氛围全匹配' },
   ]
 
@@ -390,11 +511,22 @@ function Slider({
   )
 }
 
-function MiniButton({ label, icon, onClick }: { label: string; icon: string; onClick?: () => void }) {
+function MiniButton({ label, icon, onClick, active, disabled }: {
+  label: string
+  icon: string
+  onClick?: () => void
+  active?: boolean
+  disabled?: boolean
+}) {
   return (
     <button
       onClick={onClick}
-      className="p-2 rounded-lg bg-dark-800 hover:bg-dark-700 text-center transition-colors"
+      disabled={disabled}
+      className={`p-2 rounded-lg text-center transition-colors ${
+        active
+          ? 'bg-cake-600/20 ring-1 ring-cake-500'
+          : 'bg-dark-800 hover:bg-dark-700'
+      } ${disabled ? 'opacity-40 cursor-not-allowed' : ''}`}
     >
       <span className="text-lg block">{icon}</span>
       <span className="text-[10px] text-dark-400">{label}</span>

@@ -524,6 +524,193 @@ async def enhance(req: EnhanceRequest):
     return StreamingResponse(buf, media_type="image/jpeg")
 
 
+# ─── 3D 美型 ───
+
+@app.post("/face-slim")
+async def face_slim(
+    image_id: str = Form(...),
+    strength: float = Form(0.3),
+):
+    """3D 美型 - 瘦脸"""
+    matches = list(UPLOAD_DIR.glob(f"{image_id}.*"))
+    if not matches:
+        raise HTTPException(404, "图片不存在")
+
+    img = load_image(str(matches[0]))
+    enh = get_enhance()
+    result = enh.face_slim(img, strength=strength)
+
+    result_id = str(uuid.uuid4())[:8]
+    result_path = OUTPUT_DIR / f"{result_id}.jpg"
+    imwrite_safe(str(result_path), result)
+
+    buf = io.BytesIO()
+    Image.fromarray(result).save(buf, format="JPEG", quality=95)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
+
+
+# ─── 发丝处理 ───
+
+@app.post("/hair-smooth")
+async def hair_smooth(
+    image_id: str = Form(...),
+    strength: float = Form(0.5),
+):
+    """发丝处理 - 祛碎发"""
+    matches = list(UPLOAD_DIR.glob(f"{image_id}.*"))
+    if not matches:
+        raise HTTPException(404, "图片不存在")
+
+    img = load_image(str(matches[0]))
+    enh = get_enhance()
+    result = enh.hair_smooth(img, strength=strength)
+
+    result_id = str(uuid.uuid4())[:8]
+    result_path = OUTPUT_DIR / f"{result_id}.jpg"
+    imwrite_safe(str(result_path), result)
+
+    buf = io.BytesIO()
+    Image.fromarray(result).save(buf, format="JPEG", quality=95)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
+
+
+# ─── 妆容调整 ───
+
+class MakeupRequest(BaseModel):
+    """妆容调整请求"""
+    image_id: str
+    lipstick: float = 0.0     # 口红 0-1
+    blush: float = 0.0        # 腮红 0-1
+    eyeshadow: float = 0.0    # 眼影 0-1
+    lip_color: Optional[list] = None   # [B, G, R]
+    blush_color: Optional[list] = None
+    eyeshadow_color: Optional[list] = None
+
+
+@app.post("/makeup")
+async def makeup(req: MakeupRequest):
+    """妆容调整"""
+    matches = list(UPLOAD_DIR.glob(f"{req.image_id}.*"))
+    if not matches:
+        raise HTTPException(404, "图片不存在")
+
+    img = load_image(str(matches[0]))
+    enh = get_enhance()
+
+    lip_c = tuple(req.lip_color) if req.lip_color else (0, 0, 200)
+    blush_c = tuple(req.blush_color) if req.blush_color else (100, 100, 230)
+    eye_c = tuple(req.eyeshadow_color) if req.eyeshadow_color else (120, 50, 50)
+
+    result = enh.apply_makeup(
+        img,
+        lipstick=req.lipstick,
+        blush=req.blush,
+        eyeshadow=req.eyeshadow,
+        lip_color=lip_c,
+        blush_color=blush_c,
+        eyeshadow_color=eye_c,
+    )
+
+    result_id = str(uuid.uuid4())[:8]
+    result_path = OUTPUT_DIR / f"{result_id}.jpg"
+    imwrite_safe(str(result_path), result)
+
+    buf = io.BytesIO()
+    Image.fromarray(result).save(buf, format="JPEG", quality=95)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
+
+
+# ─── AI 追色 2.0 ───
+
+@app.post("/color-match")
+async def color_match(
+    image_id: str = Form(...),
+    reference: UploadFile = File(...),
+):
+    """
+    AI 追色 2.0 - 将参考图色彩风格迁移到源图
+    上传参考图，自动匹配色彩、光影和氛围
+    """
+    matches = list(UPLOAD_DIR.glob(f"{image_id}.*"))
+    if not matches:
+        raise HTTPException(404, "源图不存在")
+
+    if not reference.content_type.startswith("image/"):
+        raise HTTPException(400, "参考图必须是图片文件")
+
+    img = load_image(str(matches[0]))
+
+    ref_content = await reference.read()
+    ref_array = np.frombuffer(ref_content, dtype=np.uint8)
+    ref_img = cv2.imdecode(ref_array, cv2.IMREAD_COLOR)
+    if ref_img is None:
+        raise HTTPException(400, "参考图无法读取")
+
+    enh = get_enhance()
+    result = enh.color_match_advanced(img, ref_img)
+
+    result_id = str(uuid.uuid4())[:8]
+    result_path = OUTPUT_DIR / f"{result_id}.jpg"
+    imwrite_safe(str(result_path), result)
+
+    buf = io.BytesIO()
+    Image.fromarray(result).save(buf, format="JPEG", quality=95)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
+
+
+# ─── 局部调色 ───
+
+class LocalAdjustRequest(BaseModel):
+    """局部调色请求"""
+    image_id: str
+    mask_id: str
+    brightness: float = 0.0
+    contrast: float = 0.0
+    saturation: float = 0.0
+    warmth: float = 0.0
+
+
+@app.post("/local-adjust")
+async def local_adjust(req: LocalAdjustRequest):
+    """基于掩码的局部调色"""
+    img_matches = list(UPLOAD_DIR.glob(f"{req.image_id}.*"))
+    if not img_matches:
+        raise HTTPException(404, "原图不存在")
+
+    mask_matches = list(OUTPUT_DIR.glob(f"{req.mask_id}_mask.png"))
+    if not mask_matches:
+        mask_matches = list(UPLOAD_DIR.glob(f"{req.mask_id}.*"))
+    if not mask_matches:
+        raise HTTPException(404, "掩码不存在")
+
+    img = load_image(str(img_matches[0]))
+    mask = imread_safe(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise HTTPException(404, "掩码文件无法读取")
+
+    enh = get_enhance()
+    result = enh.local_adjust(
+        img, mask,
+        brightness=req.brightness,
+        contrast=req.contrast,
+        saturation=req.saturation,
+        warmth=req.warmth,
+    )
+
+    result_id = str(uuid.uuid4())[:8]
+    result_path = OUTPUT_DIR / f"{result_id}.jpg"
+    imwrite_safe(str(result_path), result)
+
+    buf = io.BytesIO()
+    Image.fromarray(result).save(buf, format="JPEG", quality=95)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/jpeg")
+
+
 # ─── 批量处理 ───
 
 @app.post("/batch")
