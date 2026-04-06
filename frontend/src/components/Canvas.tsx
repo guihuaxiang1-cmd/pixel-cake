@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react'
-import { ImageInfo, Tool } from '../App'
+import { ImageInfo, Tool, AIFeature } from '../App'
 
 interface CanvasProps {
   image: ImageInfo | null
@@ -8,18 +8,34 @@ interface CanvasProps {
   brushSize: number
   zoom: number
   isProcessing: boolean
+  onAIFeature: (feature: AIFeature) => void
+  onMaskInpaint: (maskBlob: Blob) => void
+  onClearTool: () => void
+  onError: (msg: string) => void
 }
 
-export default function Canvas({ image, resultUrl, tool, brushSize, zoom, isProcessing }: CanvasProps) {
+export default function Canvas({
+  image,
+  resultUrl,
+  tool,
+  brushSize,
+  zoom,
+  isProcessing,
+  onAIFeature,
+  onMaskInpaint,
+  onClearTool,
+  onError,
+}: CanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const overlayRef = useRef<HTMLCanvasElement>(null) // 画笔覆盖层
   const [isDrawing, setIsDrawing] = useState(false)
   const [pan, setPan] = useState({ x: 0, y: 0 })
   const [panStart, setPanStart] = useState<{ x: number; y: number; panX: number; panY: number } | null>(null)
-  const [maskPoints, setMaskPoints] = useState<Array<{ x: number; y: number }>>([])
+  const [hasDrawn, setHasDrawn] = useState(false)
   const [imgLoaded, setImgLoaded] = useState(false)
 
-  // 加载图片到画布
+  // 加载图片到底层画布
   useEffect(() => {
     if (!image || !canvasRef.current) return
     const canvas = canvasRef.current
@@ -35,11 +51,27 @@ export default function Canvas({ image, resultUrl, tool, brushSize, zoom, isProc
     img.src = resultUrl || image.url
   }, [image, resultUrl])
 
+  // 同步覆盖层尺寸
+  useEffect(() => {
+    if (!canvasRef.current || !overlayRef.current) return
+    overlayRef.current.width = canvasRef.current.width
+    overlayRef.current.height = canvasRef.current.height
+  }, [imgLoaded])
+
+  // 切换工具时清空画笔
+  useEffect(() => {
+    if (tool !== 'brush' && tool !== 'eraser' && tool !== 'inpaint') {
+      clearOverlay()
+    }
+  }, [tool])
+
   // 计算鼠标在画布上的坐标
   const getCanvasCoords = useCallback(
     (e: React.MouseEvent) => {
-      if (!canvasRef.current || !containerRef.current) return null
+      if (!containerRef.current || !overlayRef.current) return null
       const rect = containerRef.current.getBoundingClientRect()
+      const scaleX = overlayRef.current.width / (rect.width)
+      const scaleY = overlayRef.current.height / (rect.height)
       const x = (e.clientX - rect.left - pan.x) / zoom
       const y = (e.clientY - rect.top - pan.y) / zoom
       return { x: Math.round(x), y: Math.round(y) }
@@ -47,26 +79,92 @@ export default function Canvas({ image, resultUrl, tool, brushSize, zoom, isProc
     [pan, zoom]
   )
 
+  const clearOverlay = useCallback(() => {
+    if (!overlayRef.current) return
+    const ctx = overlayRef.current.getContext('2d')!
+    ctx.clearRect(0, 0, overlayRef.current.width, overlayRef.current.height)
+    setHasDrawn(false)
+  }, [])
+
+  // 生成 mask 图片（白底黑画笔区域）
+  const generateMaskBlob = useCallback((): Promise<Blob | null> => {
+    return new Promise((resolve) => {
+      if (!overlayRef.current) { resolve(null); return }
+      const src = overlayRef.current
+      // 创建离屏 canvas 生成二值 mask
+      const maskCanvas = document.createElement('canvas')
+      maskCanvas.width = src.width
+      maskCanvas.height = src.height
+      const ctx = maskCanvas.getContext('2d')!
+      // 黑色背景
+      ctx.fillStyle = '#000000'
+      ctx.fillRect(0, 0, maskCanvas.width, maskCanvas.height)
+      // 把覆盖层中非透明区域画成白色
+      const srcData = src.getContext('2d')!.getImageData(0, 0, src.width, src.height)
+      const maskData = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height)
+      for (let i = 0; i < srcData.data.length; i += 4) {
+        if (srcData.data[i + 3] > 0) {
+          maskData.data[i] = 255     // R
+          maskData.data[i + 1] = 255 // G
+          maskData.data[i + 2] = 255 // B
+          maskData.data[i + 3] = 255 // A
+        }
+      }
+      ctx.putImageData(maskData, 0, 0)
+      maskCanvas.toBlob((blob) => resolve(blob), 'image/png')
+    })
+  }, [])
+
+  // 提交画笔 mask 做 inpaint
+  const handleSubmitInpaint = useCallback(async () => {
+    if (!image || !hasDrawn) return
+    const maskBlob = await generateMaskBlob()
+    if (maskBlob) {
+      onMaskInpaint(maskBlob)
+      clearOverlay()
+    }
+  }, [image, hasDrawn, generateMaskBlob, onMaskInpaint, clearOverlay])
+
   // 鼠标事件
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
       if (!image) return
 
+      // 平移
       if (tool === 'hand' || e.button === 1) {
         setPanStart({ x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y })
         return
       }
 
-      if (tool === 'brush' || tool === 'eraser') {
+      // AI 识人 - 一键去路人
+      if (tool === 'auto-person') {
+        onAIFeature('remove-person')
+        return
+      }
+
+      // AI 识天 - 一键换天空
+      if (tool === 'auto-sky') {
+        onAIFeature('sky-replace')
+        return
+      }
+
+      // 裁剪 - 提示未实现
+      if (tool === 'crop') {
+        onError('裁剪功能即将上线，敬请期待')
+        return
+      }
+
+      // 画笔 / 橡皮 / AI修复
+      if (tool === 'brush' || tool === 'eraser' || tool === 'inpaint') {
         setIsDrawing(true)
         const coords = getCanvasCoords(e)
         if (coords) {
-          setMaskPoints([coords])
           drawBrush(coords)
+          setHasDrawn(true)
         }
       }
     },
-    [image, tool, pan, getCanvasCoords]
+    [image, tool, pan, getCanvasCoords, onAIFeature, onError]
   )
 
   const handleMouseMove = useCallback(
@@ -82,7 +180,6 @@ export default function Canvas({ image, resultUrl, tool, brushSize, zoom, isProc
       if (!isDrawing) return
       const coords = getCanvasCoords(e)
       if (coords) {
-        setMaskPoints(prev => [...prev, coords])
         drawBrush(coords)
       }
     },
@@ -94,15 +191,19 @@ export default function Canvas({ image, resultUrl, tool, brushSize, zoom, isProc
     setPanStart(null)
   }, [])
 
-  // 绘制画笔
+  // 在覆盖层上绘制
   const drawBrush = useCallback(
     (coords: { x: number; y: number }) => {
-      if (!canvasRef.current) return
-      const ctx = canvasRef.current.getContext('2d')!
+      if (!overlayRef.current) return
+      const ctx = overlayRef.current.getContext('2d')!
       ctx.globalCompositeOperation = tool === 'eraser' ? 'destination-out' : 'source-over'
       ctx.beginPath()
       ctx.arc(coords.x, coords.y, brushSize / 2, 0, Math.PI * 2)
-      ctx.fillStyle = tool === 'eraser' ? 'rgba(0,0,0,1)' : 'rgba(255, 69, 100, 0.5)'
+      if (tool === 'eraser') {
+        ctx.fillStyle = 'rgba(0,0,0,1)'
+      } else {
+        ctx.fillStyle = 'rgba(255, 69, 100, 0.5)'
+      }
       ctx.fill()
     },
     [tool, brushSize]
@@ -112,7 +213,6 @@ export default function Canvas({ image, resultUrl, tool, brushSize, zoom, isProc
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       e.preventDefault()
-      // 缩放由父组件控制
     },
     []
   )
@@ -128,10 +228,13 @@ export default function Canvas({ image, resultUrl, tool, brushSize, zoom, isProc
     crop: 'crosshair',
   }
 
+  const showInpaintButton = hasDrawn && (tool === 'brush' || tool === 'inpaint')
+  const isAIClickTool = tool === 'auto-person' || tool === 'auto-sky'
+
   return (
     <div
       ref={containerRef}
-      className="w-full h-full flex items-center justify-center overflow-hidden"
+      className="w-full h-full flex items-center justify-center overflow-hidden relative"
       style={{ cursor: cursorMap[tool] || 'default' }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}
@@ -146,14 +249,53 @@ export default function Canvas({ image, resultUrl, tool, brushSize, zoom, isProc
             transformOrigin: 'center',
             transition: panStart ? 'none' : 'transform 0.1s ease-out',
           }}
+          className="relative"
         >
+          {/* 底层：图片 */}
           <canvas
             ref={canvasRef}
-            className="max-w-none shadow-2xl rounded-sm"
+            className="max-w-none shadow-2xl rounded-sm block"
             style={{ imageRendering: zoom > 2 ? 'pixelated' : 'auto' }}
+          />
+          {/* 上层：画笔覆盖层 */}
+          <canvas
+            ref={overlayRef}
+            className="absolute top-0 left-0 max-w-none"
+            style={{
+              imageRendering: zoom > 2 ? 'pixelated' : 'auto',
+              pointerEvents: 'none',
+            }}
           />
         </div>
       ) : null}
+
+      {/* 画笔/修复模式：提交按钮 */}
+      {showInpaintButton && !isProcessing && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 flex gap-3 animate-fadeIn">
+          <button
+            onClick={handleSubmitInpaint}
+            className="px-6 py-2.5 rounded-xl bg-cake-600 hover:bg-cake-500 text-white font-medium text-sm shadow-lg shadow-cake-600/30 transition-all hover:scale-105 flex items-center gap-2"
+          >
+            ✨ AI 修复选区
+          </button>
+          <button
+            onClick={clearOverlay}
+            className="px-4 py-2.5 rounded-xl bg-dark-700 hover:bg-dark-600 text-dark-200 text-sm shadow-lg transition-all"
+          >
+            清除画笔
+          </button>
+        </div>
+      )}
+
+      {/* AI 一键工具：操作提示 */}
+      {isAIClickTool && image && !isProcessing && (
+        <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-40 animate-fadeIn">
+          <div className="px-5 py-2.5 rounded-xl bg-dark-800/90 text-dark-200 text-sm shadow-lg backdrop-blur-sm border border-dark-600">
+            {tool === 'auto-person' && '👆 点击图片，AI 自动识别并去除路人'}
+            {tool === 'auto-sky' && '👆 点击图片，AI 自动替换天空'}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

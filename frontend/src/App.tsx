@@ -387,6 +387,44 @@ export default function App() {
     }
   }, [historyIndex, history])
 
+  // ─── 画笔提交修复 ───
+
+  const handleMaskInpaint = useCallback(async (maskBlob: Blob) => {
+    if (!image) return
+    setIsProcessing(true)
+    setErrorMsg(null)
+    try {
+      // 上传 mask
+      const maskForm = new FormData()
+      maskForm.append('file', maskBlob, 'mask.png')
+      const maskUploadRes = await fetch('/api/upload', { method: 'POST', body: maskForm })
+      if (!maskUploadRes.ok) throw new Error('Mask 上传失败')
+      const maskData = await maskUploadRes.json()
+      const maskId = maskData.image_id
+
+      // 调用 inpaint
+      const res = await fetch('/api/inpaint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image_id: image.imageId, mask_id: maskId }),
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`修复失败 (${res.status}): ${text}`)
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      setResultUrl(url)
+      setHistory(prev => [...prev.slice(0, historyIndex + 1), url])
+      setHistoryIndex(prev => prev + 1)
+    } catch (err: any) {
+      console.error('画笔修复失败:', err)
+      setErrorMsg(`修复失败: ${err.message}`)
+    } finally {
+      setIsProcessing(false)
+    }
+  }, [image, historyIndex])
+
   // ─── 下载 ───
 
   const handleDownload = useCallback(() => {
@@ -440,6 +478,10 @@ export default function App() {
               brushSize={brushSize}
               zoom={zoom}
               isProcessing={isProcessing}
+              onAIFeature={handleAIFeature}
+              onMaskInpaint={handleMaskInpaint}
+              onClearTool={() => setTool('select')}
+              onError={setErrorMsg}
             />
           )}
 
