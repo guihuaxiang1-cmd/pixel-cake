@@ -120,6 +120,8 @@ class EnhanceRequest(BaseModel):
     warmth: float = 0.0        # -1 ~ 1
     sharpness: float = 0.0     # 0 ~ 1
     denoise: float = 0.0       # 0 ~ 1
+    filter: Optional[str] = None     # 滤镜名称
+    skin_smooth: bool = False  # 是否磨皮
 
 
 class BatchRequest(BaseModel):
@@ -392,15 +394,23 @@ async def enhance(req: EnhanceRequest):
 
     img = load_image(str(matches[0]))
     enh = get_enhance()
-    result = enh.adjust(
-        img,
-        brightness=req.brightness,
-        contrast=req.contrast,
-        saturation=req.saturation,
-        warmth=req.warmth,
-        sharpness=req.sharpness,
-        denoise=req.denoise,
-    )
+
+    # 如果指定了滤镜，先应用滤镜
+    if req.filter:
+        result = enh.apply_filter(img, req.filter)
+    # 如果指定磨皮，应用中性灰磨皮
+    elif req.skin_smooth:
+        result = enh.skin_smooth(img)
+    else:
+        result = enh.adjust(
+            img,
+            brightness=req.brightness,
+            contrast=req.contrast,
+            saturation=req.saturation,
+            warmth=req.warmth,
+            sharpness=req.sharpness,
+            denoise=req.denoise,
+        )
 
     result_id = str(uuid.uuid4())[:8]
     result_path = OUTPUT_DIR / f"{result_id}.jpg"

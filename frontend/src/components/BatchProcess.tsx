@@ -37,8 +37,11 @@ export default function BatchProcess() {
   const handleStart = useCallback(async () => {
     setIsRunning(true)
 
-    for (let i = 0; i < images.length; i++) {
-      if (images[i].status === 'done') continue
+    // 拍一份快照，避免循环中 images 变化
+    const snapshot = [...images]
+
+    for (let i = 0; i < snapshot.length; i++) {
+      if (snapshot[i].status === 'done') continue
 
       setImages(prev => prev.map((img, idx) =>
         idx === i ? { ...img, status: 'processing' } : img
@@ -47,12 +50,13 @@ export default function BatchProcess() {
       try {
         // 上传
         const fd = new FormData()
-        fd.append('file', images[i].file)
+        fd.append('file', snapshot[i].file)
         const uploadRes = await fetch('/api/upload', { method: 'POST', body: fd })
+        if (!uploadRes.ok) throw new Error(`上传失败: ${uploadRes.status}`)
         const { image_id } = await uploadRes.json()
 
         // 处理
-        let resultUrl = ''
+        let resultBlob: Blob | null = null
         if (action === 'auto_remove') {
           const segRes = await fetch('/api/auto-segment', {
             method: 'POST',
@@ -65,7 +69,8 @@ export default function BatchProcess() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ image_id, mask_id: maskId }),
             })
-            resultUrl = URL.createObjectURL(await inpRes.blob())
+            if (!inpRes.ok) throw new Error('修复失败')
+            resultBlob = await inpRes.blob()
           }
         } else if (action === 'enhance') {
           const res = await fetch('/api/enhance', {
@@ -78,20 +83,24 @@ export default function BatchProcess() {
               saturation: 0.05,
             }),
           })
-          resultUrl = URL.createObjectURL(await res.blob())
+          if (!res.ok) throw new Error('调色失败')
+          resultBlob = await res.blob()
         } else if (action === 'sky_replace') {
           const res = await fetch('/api/sky/replace', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image_id, sky_type: 'sunset' }),
           })
-          resultUrl = URL.createObjectURL(await res.blob())
+          if (!res.ok) throw new Error('换天失败')
+          resultBlob = await res.blob()
         }
 
+        const resultUrl = resultBlob ? URL.createObjectURL(resultBlob) : undefined
         setImages(prev => prev.map((img, idx) =>
-          idx === i ? { ...img, status: 'done', resultUrl } : img
+          idx === i ? { ...img, status: resultUrl ? 'done' : 'error', resultUrl } : img
         ))
-      } catch {
+      } catch (err) {
+        console.error(`批量处理第 ${i + 1} 张失败:`, err)
         setImages(prev => prev.map((img, idx) =>
           idx === i ? { ...img, status: 'error' } : img
         ))
@@ -100,6 +109,33 @@ export default function BatchProcess() {
 
     setIsRunning(false)
   }, [images, action])
+
+  // 全部下载
+  const handleDownloadAll = useCallback(async () => {
+    const doneImages = images.filter(i => i.status === 'done' && i.resultUrl)
+    for (let i = 0; i < doneImages.length; i++) {
+      const img = doneImages[i]
+      try {
+        const res = await fetch(img.resultUrl!)
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        const baseName = img.file.name.replace(/\.[^.]+$/, '')
+        a.download = `${baseName}_edited.jpg`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+        // 间隔一下避免浏览器拦截
+        if (i < doneImages.length - 1) {
+          await new Promise(r => setTimeout(r, 300))
+        }
+      } catch (err) {
+        console.error(`下载 ${img.file.name} 失败:`, err)
+      }
+    }
+  }, [images])
 
   const doneCount = images.filter(i => i.status === 'done').length
 
@@ -170,6 +206,12 @@ export default function BatchProcess() {
                     src={img.resultUrl || img.preview}
                     alt={img.file.name}
                     className="w-full h-full object-cover"
+                    onError={e => {
+                      // resultUrl 无效时回退到预览图
+                      if (img.resultUrl && e.currentTarget.src !== img.preview) {
+                        e.currentTarget.src = img.preview
+                      }
+                    }}
                   />
                   {/* 状态标识 */}
                   <div className="absolute top-2 right-2">
@@ -230,7 +272,10 @@ export default function BatchProcess() {
                 {isRunning ? '⏳ 处理中...' : '🚀 开始批量处理'}
               </button>
               {doneCount > 0 && (
-                <button className="px-4 py-2.5 bg-dark-700 hover:bg-dark-600 rounded-lg text-sm transition-colors">
+                <button
+                  onClick={handleDownloadAll}
+                  className="px-4 py-2.5 bg-dark-700 hover:bg-dark-600 rounded-lg text-sm transition-colors"
+                >
                   💾 全部下载
                 </button>
               )}
