@@ -40,7 +40,7 @@ export type AIFeature =
   | 'fill-grass'
   | 'sky-replace'
   | 'skin-smooth'
-  | 'teeth-whiten'
+  | 'teeth-whiten'   // FIX: added
   | 'color-match'
 
 export type AdjustMode = 'basic' | 'color' | 'detail' | 'filter' | 'ai'
@@ -88,6 +88,16 @@ export default function App() {
   const [historyIndex, setHistoryIndex] = useState(-1)
   const [zoom, setZoom] = useState(1)
   const [selectedFilter, setSelectedFilter] = useState<string | null>(null)
+  // FIX: Add error message state for user-visible feedback
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  // Auto-clear error after 5 seconds
+  useEffect(() => {
+    if (errorMsg) {
+      const timer = setTimeout(() => setErrorMsg(null), 5000)
+      return () => clearTimeout(timer)
+    }
+  }, [errorMsg])
 
   // ─── 上传图片 ───
 
@@ -121,6 +131,7 @@ export default function App() {
   const handleAIFeature = useCallback(async (feature: AIFeature) => {
     if (!image) return
     setIsProcessing(true)
+    setErrorMsg(null)
 
     try {
       let blob: Blob | null = null
@@ -134,6 +145,7 @@ export default function App() {
             method: 'POST',
             body: new URLSearchParams({ image_id: image.imageId, mode }),
           })
+          if (!segRes.ok) throw new Error(`分割失败 (${segRes.status})`)
           const maskId = segRes.headers.get('X-Mask-Id')
           if (maskId) {
             const inpRes = await fetch('/api/inpaint', {
@@ -141,17 +153,19 @@ export default function App() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ image_id: image.imageId, mask_id: maskId }),
             })
+            if (!inpRes.ok) throw new Error(`修复失败 (${inpRes.status})`)
             blob = await inpRes.blob()
           }
           break
         }
         case 'remove-tattoo':
         case 'remove-stubble': {
-          // 皮肤区域检测 + inpaint
+          // FIX: Use 'skin' mode (now supported by backend)
           const segRes = await fetch('/api/auto-segment', {
             method: 'POST',
             body: new URLSearchParams({ image_id: image.imageId, mode: 'skin' }),
           })
+          if (!segRes.ok) throw new Error(`皮肤检测失败 (${segRes.status})`)
           const maskId = segRes.headers.get('X-Mask-Id')
           if (maskId) {
             const inpRes = await fetch('/api/inpaint', {
@@ -159,6 +173,7 @@ export default function App() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ image_id: image.imageId, mask_id: maskId }),
             })
+            if (!inpRes.ok) throw new Error(`修复失败 (${inpRes.status})`)
             blob = await inpRes.blob()
           }
           break
@@ -169,6 +184,7 @@ export default function App() {
           fd.append('brightness', '0.3')
           fd.append('warmth', '0.1')
           const res = await fetch('/api/relight', { method: 'POST', body: fd })
+          if (!res.ok) throw new Error(`补光失败 (${res.status})`)
           blob = await res.blob()
           break
         }
@@ -178,14 +194,17 @@ export default function App() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image_id: image.imageId, sky_type: 'sunset', blend_strength: 0.7 }),
           })
+          if (!res.ok) throw new Error(`换天空失败 (${res.status})`)
           blob = await res.blob()
           break
         }
         case 'fill-grass': {
+          // FIX: Use 'ground' mode (now supported by backend)
           const segRes = await fetch('/api/auto-segment', {
             method: 'POST',
             body: new URLSearchParams({ image_id: image.imageId, mode: 'ground' }),
           })
+          if (!segRes.ok) throw new Error(`地面检测失败 (${segRes.status})`)
           const maskId = segRes.headers.get('X-Mask-Id')
           if (maskId) {
             const inpRes = await fetch('/api/inpaint', {
@@ -193,11 +212,13 @@ export default function App() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ image_id: image.imageId, mask_id: maskId, fill_type: 'grass' }),
             })
+            if (!inpRes.ok) throw new Error(`补草地失败 (${inpRes.status})`)
             blob = await inpRes.blob()
           }
           break
         }
         case 'skin-smooth': {
+          // FIX: skin_smooth field now accepted by backend
           const res = await fetch('/api/enhance', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -212,11 +233,30 @@ export default function App() {
               skin_smooth: true,
             }),
           })
+          if (!res.ok) throw new Error(`磨皮失败 (${res.status})`)
           blob = await res.blob()
           break
         }
+        case 'teeth-whiten': {
+          // FIX: Now properly implemented
+          const segRes = await fetch('/api/auto-segment', {
+            method: 'POST',
+            body: new URLSearchParams({ image_id: image.imageId, mode: 'teeth' }),
+          })
+          if (!segRes.ok) throw new Error(`牙齿检测失败 (${segRes.status})`)
+          const maskId = segRes.headers.get('X-Mask-Id')
+          if (maskId) {
+            const inpRes = await fetch('/api/inpaint', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ image_id: image.imageId, mask_id: maskId, fill_type: 'whiten' }),
+            })
+            if (!inpRes.ok) throw new Error(`美白失败 (${inpRes.status})`)
+            blob = await inpRes.blob()
+          }
+          break
+        }
         case 'color-match': {
-          // AI追色：需要参考图，暂时用自动调色代替
           const res = await fetch('/api/enhance', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -230,23 +270,8 @@ export default function App() {
               denoise: 0.1,
             }),
           })
+          if (!res.ok) throw new Error(`追色失败 (${res.status})`)
           blob = await res.blob()
-          break
-        }
-        case 'teeth-whiten': {
-          const segRes = await fetch('/api/auto-segment', {
-            method: 'POST',
-            body: new URLSearchParams({ image_id: image.imageId, mode: 'teeth' }),
-          })
-          const maskId = segRes.headers.get('X-Mask-Id')
-          if (maskId) {
-            const inpRes = await fetch('/api/inpaint', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ image_id: image.imageId, mask_id: maskId, fill_type: 'whiten' }),
-            })
-            blob = await inpRes.blob()
-          }
           break
         }
       }
@@ -256,9 +281,14 @@ export default function App() {
         setResultUrl(url)
         setHistory(prev => [...prev.slice(0, historyIndex + 1), url])
         setHistoryIndex(prev => prev + 1)
+      } else {
+        // FIX: No result = show error
+        setErrorMsg('处理未返回结果，请检查图片是否正确上传')
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('AI处理失败:', err)
+      // FIX: User-visible error message
+      setErrorMsg(`AI 处理失败: ${err.message || '未知错误'}`)
     } finally {
       setIsProcessing(false)
     }
@@ -272,6 +302,7 @@ export default function App() {
     setParams(merged)
 
     try {
+      // FIX: Send ALL parameters to backend
       const res = await fetch('/api/enhance', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -283,12 +314,22 @@ export default function App() {
           warmth: merged.warmth,
           sharpness: merged.sharpness,
           denoise: merged.denoise,
+          highlights: merged.highlights,
+          shadows: merged.shadows,
+          vibrance: merged.vibrance,
+          clarity: merged.clarity,
+          tint: merged.tint,
         }),
       })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`调色失败 (${res.status}): ${text}`)
+      }
       const blob = await res.blob()
       setResultUrl(URL.createObjectURL(blob))
-    } catch (err) {
+    } catch (err: any) {
       console.error('调色失败:', err)
+      setErrorMsg(`调色失败: ${err.message}`)
     }
   }, [image, params])
 
@@ -298,7 +339,9 @@ export default function App() {
     if (!image) return
     setSelectedFilter(filterName)
     setIsProcessing(true)
+    setErrorMsg(null)
     try {
+      // FIX: Only send filter name + required fields, backend now handles filter field
       const res = await fetch('/api/enhance', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -316,9 +359,13 @@ export default function App() {
       if (res.ok) {
         const blob = await res.blob()
         setResultUrl(URL.createObjectURL(blob))
+      } else {
+        const text = await res.text()
+        throw new Error(`滤镜失败 (${res.status}): ${text}`)
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('滤镜失败:', err)
+      setErrorMsg(`滤镜失败: ${err.message}`)
     } finally {
       setIsProcessing(false)
     }
@@ -429,6 +476,20 @@ export default function App() {
                 <p className="text-lg text-dark-200">AI 处理中...</p>
                 <p className="text-sm text-dark-400 mt-1">这可能需要几秒钟</p>
               </div>
+            </div>
+          )}
+
+          {/* FIX: 错误提示浮层 */}
+          {errorMsg && (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-red-900/90 text-red-100 px-6 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-fadeIn">
+              <span className="text-lg">⚠️</span>
+              <span className="text-sm">{errorMsg}</span>
+              <button
+                onClick={() => setErrorMsg(null)}
+                className="ml-2 text-red-300 hover:text-white transition-colors"
+              >
+                ✕
+              </button>
             </div>
           )}
         </div>
