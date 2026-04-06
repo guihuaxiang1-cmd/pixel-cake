@@ -66,7 +66,14 @@ export default function Sidebar({
           <ColorPanel params={params} onChange={onParamsChange} />
         )}
         {mode === 'detail' && (
-          <DetailPanel params={params} onChange={onParamsChange} />
+          // FIX: Pass onAIFeature to DetailPanel so buttons actually work
+          <DetailPanel
+            params={params}
+            onChange={onParamsChange}
+            onAIFeature={onAIFeature}
+            hasImage={!!image}
+            isProcessing={isProcessing}
+          />
         )}
         {mode === 'filter' && (
           <FilterPanel
@@ -154,9 +161,15 @@ function ColorPanel({
 function DetailPanel({
   params,
   onChange,
+  onAIFeature,
+  hasImage,
+  isProcessing,
 }: {
   params: AdjustParams
   onChange: (p: Partial<AdjustParams>) => void
+  onAIFeature: (f: AIFeature) => void
+  hasImage: boolean
+  isProcessing: boolean
 }) {
   return (
     <div className="space-y-4">
@@ -170,11 +183,30 @@ function DetailPanel({
       <div className="pt-2 border-t border-dark-700">
         <h4 className="text-xs text-dark-400 mb-3 font-medium">人像精修</h4>
         <div className="space-y-2">
-          <FeatureButton label="中性灰磨皮" desc="广告级光影重塑" icon="✨" onClick={() => {}} />
-          <FeatureButton label="3D美型" desc="骨骼定位精修" icon="💎" onClick={() => {}} />
-          <FeatureButton label="发丝处理" desc="祛碎发/换发色" icon="💇" onClick={() => {}} />
-          <FeatureButton label="牙齿美白" desc="自动检测美白" icon="😁" onClick={() => {}} />
-          <FeatureButton label="妆容调整" desc="吸管取色调妆" icon="💄" onClick={() => {}} />
+          {/* FIX: Wire up buttons to actual API calls */}
+          <FeatureButton
+            label="中性灰磨皮"
+            desc="广告级光影重塑"
+            icon="✨"
+            disabled={!hasImage || isProcessing}
+            onClick={() => onAIFeature('skin-smooth')}
+          />
+          <FeatureButton label="3D美型" desc="骨骼定位精修" icon="💎"
+            disabled={!hasImage || isProcessing}
+            onClick={() => { /* 未实现 */ }} />
+          <FeatureButton label="发丝处理" desc="祛碎发/换发色" icon="💇"
+            disabled={!hasImage || isProcessing}
+            onClick={() => { /* 未实现 */ }} />
+          <FeatureButton
+            label="牙齿美白"
+            desc="自动检测美白"
+            icon="😁"
+            disabled={!hasImage || isProcessing}
+            onClick={() => onAIFeature('teeth-whiten')}
+          />
+          <FeatureButton label="妆容调整" desc="吸管取色调妆" icon="💄"
+            disabled={!hasImage || isProcessing}
+            onClick={() => { /* 未实现 */ }} />
         </div>
       </div>
     </div>
@@ -252,6 +284,8 @@ function AIPanel({
     { id: 'fill-grass', icon: '🌿', label: 'AI补草地', desc: '自动生成草地纹理' },
     { id: 'sky-replace', icon: '🌅', label: '换天空', desc: '无缝天空替换' },
     { id: 'skin-smooth', icon: '✨', label: '中性灰磨皮', desc: '保留纹理的磨皮' },
+    // FIX: Add teeth-whiten to AI panel
+    { id: 'teeth-whiten', icon: '😁', label: '牙齿美白', desc: '自动检测美白' },
     { id: 'color-match', icon: '🎯', label: 'AI追色 2.0', desc: '光影氛围全匹配' },
   ]
 
@@ -348,17 +382,20 @@ function FeatureButton({
   label,
   desc,
   icon,
+  disabled,
   onClick,
 }: {
   label: string
   desc: string
   icon: string
+  disabled?: boolean
   onClick: () => void
 }) {
   return (
     <button
       onClick={onClick}
-      className="w-full p-2.5 rounded-lg bg-dark-800 hover:bg-dark-700 text-left transition-colors"
+      disabled={disabled}
+      className="w-full p-2.5 rounded-lg bg-dark-800 hover:bg-dark-700 disabled:opacity-40 disabled:cursor-not-allowed text-left transition-colors"
     >
       <div className="flex items-center gap-2">
         <span>{icon}</span>
