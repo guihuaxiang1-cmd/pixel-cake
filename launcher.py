@@ -1,6 +1,8 @@
 """
 Pixel Cake - Launcher
 Serves frontend static files + API in one process.
+
+FIXED VERSION - resolves frontend/backend API mismatches
 """
 
 import os
@@ -82,12 +84,90 @@ def main():
             raise ValueError(f"Cannot load: {path}")
         return img
 
+    # -- Skin detection fallback (for tattoo/stubble removal) --
+    def detect_skin_mask(image: np.ndarray) -> np.ndarray:
+        """Detect skin regions using HSV + YCrCb color space"""
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
+
+        # HSV skin range
+        lower_hsv = np.array([0, 20, 70], dtype=np.uint8)
+        upper_hsv = np.array([20, 255, 255], dtype=np.uint8)
+        mask_hsv = cv2.inRange(hsv, lower_hsv, upper_hsv)
+
+        # YCrCb skin range
+        lower_ycrcb = np.array([0, 133, 77], dtype=np.uint8)
+        upper_ycrcb = np.array([255, 173, 127], dtype=np.uint8)
+        mask_ycrcb = cv2.inRange(ycrcb, lower_ycrcb, upper_ycrcb)
+
+        # Combine
+        mask = cv2.bitwise_or(mask_hsv, mask_ycrcb)
+
+        # Clean up
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        return mask
+
+    def detect_teeth_mask(image: np.ndarray) -> np.ndarray:
+        """Detect teeth region using brightness + face area heuristic"""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        h, w = image.shape[:2]
+
+        # Teeth are bright, low-saturation regions in the lower-center of the face
+        # Simple approach: detect bright white regions
+        _, bright = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+
+        # Focus on center-lower portion of image (where mouths are)
+        region_mask = np.zeros((h, w), dtype=np.uint8)
+        region_mask[h//3:h*2//3, w//4:w*3//4] = 255
+
+        mask = cv2.bitwise_and(bright, region_mask)
+
+        # Clean up small noise
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        return mask
+
+    def detect_ground_mask(image: np.ndarray) -> np.ndarray:
+        """Detect ground/grass regions"""
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        h, w = image.shape[:2]
+
+        # Green/brown ground colors
+        lower_green = np.array([25, 20, 20], dtype=np.uint8)
+        upper_green = np.array([85, 255, 255], dtype=np.uint8)
+        mask_green = cv2.inRange(hsv, lower_green, upper_green)
+
+        # Brown/dirt colors
+        lower_brown = np.array([10, 30, 20], dtype=np.uint8)
+        upper_brown = np.array([25, 255, 200], dtype=np.uint8)
+        mask_brown = cv2.inRange(hsv, lower_brown, upper_brown)
+
+        mask = cv2.bitwise_or(mask_green, mask_brown)
+
+        # Ground is usually in the lower portion
+        weight = np.zeros((h, w), dtype=np.float32)
+        for i in range(h):
+            weight[i, :] = max(0, (i / h) - 0.3) / 0.7
+        mask = (mask.astype(np.float32) * weight).astype(np.uint8)
+
+        _, mask = cv2.threshold(mask, 50, 255, cv2.THRESH_BINARY)
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+        return mask
+
     # -- Models --
     class InpaintRequest(BaseModel):
         image_id: str
         mask_id: str
         prompt: str = ""
-        strength: float = 0.8
+        fill_type: Optional[str] = None  # FIX: accept fill_type from frontend
 
     class SkyReplaceRequest(BaseModel):
         image_id: str
@@ -102,6 +182,14 @@ def main():
         warmth: float = 0.0
         sharpness: float = 0.0
         denoise: float = 0.0
+        # FIX: Add missing fields that frontend sends
+        highlights: float = 0.0
+        shadows: float = 0.0
+        vibrance: float = 0.0
+        clarity: float = 0.0
+        tint: float = 0.0
+        filter: Optional[str] = None
+        skin_smooth: bool = False
 
     # -- API Routes --
 
@@ -141,18 +229,57 @@ def main():
             raise HTTPException(404, "Image not found")
         img = load_image(str(matches[0]))
         seg = get_service("segmentation")
-        if seg is None:
-            # Fallback: return a full mask
-            combined = np.zeros(img.shape[:2], dtype=np.uint8)
-        else:
-            masks = seg.auto_detect_people(img) if mode == "person" else (
-                seg.auto_detect_sky(img) if mode == "sky" else seg.auto_detect_all(img))
+
+        if seg is not None:
+            if mode == "person":
+                masks = seg.auto_detect_people(img)
+            elif mode == "sky":
+                masks = seg.auto_detect_sky(img)
+            # FIX: Add missing modes
+            elif mode == "skin":
+                skin = detect_skin_mask(img)
+                masks = [skin] if cv2.countNonZero(skin) > 0 else []
+            elif mode == "teeth":
+                teeth = detect_teeth_mask(img)
+                masks = [teeth] if cv2.countNonZero(teeth) > 0 else []
+            elif mode == "ground":
+                ground = detect_ground_mask(img)
+                masks = [ground] if cv2.countNonZero(ground) > 0 else []
+            else:
+                masks = seg.auto_detect_all(img)
+
             if masks:
                 combined = np.zeros_like(masks[0])
                 for m in masks:
                     combined = np.maximum(combined, m)
             else:
                 combined = np.zeros(img.shape[:2], dtype=np.uint8)
+        else:
+            # FIX: Fallback with mode support when segmentation service unavailable
+            if mode == "skin":
+                combined = detect_skin_mask(img)
+            elif mode == "teeth":
+                combined = detect_teeth_mask(img)
+            elif mode == "ground":
+                combined = detect_ground_mask(img)
+            elif mode == "sky":
+                # Simple sky detection fallback
+                hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+                lower_blue = np.array([90, 30, 80])
+                upper_blue = np.array([130, 255, 255])
+                combined = cv2.inRange(hsv, lower_blue, upper_blue)
+            else:
+                # person/all - use HOG person detection
+                hog = cv2.HOGDescriptor()
+                hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+                rects, _ = hog.detectMultiScale(img, winStride=(4, 4), padding=(8, 8), scale=1.05)
+                combined = np.zeros(img.shape[:2], dtype=np.uint8)
+                for (x, y, w, h) in rects:
+                    x1, y1 = max(0, x - 10), max(0, y - 10)
+                    x2 = min(img.shape[1], x + w + 10)
+                    y2 = min(img.shape[0], y + h + 20)
+                    combined[y1:y2, x1:x2] = 255
+
         mask_id = str(uuid.uuid4())[:8]
         mask_path = OUTPUT_DIR / f"{mask_id}_mask.png"
         cv2.imwrite(str(mask_path), combined)
@@ -168,12 +295,38 @@ def main():
             raise HTTPException(404, "Mask not found")
         img = load_image(str(img_matches[0]))
         mask = cv2.imread(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
-        inp = get_service("inpainting")
-        if inp:
-            result = inp.inpaint(img, mask, prompt=req.prompt)
+
+        # FIX: handle fill_type (whiten, grass) before standard inpaint
+        if req.fill_type == "whiten":
+            # Teeth whitening: adjust brightness in masked area
+            enh = get_service("enhance")
+            if enh:
+                result = enh.local_adjust(img, mask, brightness=0.3, saturation=-0.2)
+            else:
+                # Fallback: simple brightness boost in mask area
+                result = img.copy().astype(np.float32)
+                mask_norm = mask.astype(np.float32) / 255.0
+                mask_3ch = np.stack([mask_norm] * 3, axis=-1)
+                result = result + mask_3ch * 60
+                result = result.clip(0, 255).astype(np.uint8)
+        elif req.fill_type == "grass":
+            # Generate green texture in masked area
+            result = img.copy()
+            mask_bool = mask > 127
+            green = np.array([50, 140, 50], dtype=np.uint8)
+            noise = np.random.randint(-20, 20, img.shape, dtype=np.int16)
+            grass_color = np.clip(green.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+            result[mask_bool] = grass_color[mask_bool]
         else:
-            # Fallback: use OpenCV inpainting
-            result = cv2.inpaint(img, mask, 7, cv2.INPAINT_TELEA)
+            inp = get_service("inpainting")
+            if inp:
+                result = inp.inpaint(img, mask, prompt=req.prompt)
+            else:
+                # Fallback: OpenCV inpainting
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                mask_dilated = cv2.dilate(mask, kernel, iterations=2)
+                result = cv2.inpaint(img, mask_dilated, inpaintRadius=7, flags=cv2.INPAINT_TELEA)
+
         rid = str(uuid.uuid4())[:8]
         rpath = OUTPUT_DIR / f"{rid}.jpg"
         cv2.imwrite(str(rpath), result)
@@ -186,14 +339,61 @@ def main():
             raise HTTPException(404, "Image not found")
         img = load_image(str(matches[0]))
         enh = get_service("enhance")
-        if enh:
-            result = enh.adjust(
-                img, brightness=req.brightness, contrast=req.contrast,
-                saturation=req.saturation, warmth=req.warmth,
-                sharpness=req.sharpness, denoise=req.denoise,
-            )
+
+        # FIX: Handle filter mode
+        if req.filter:
+            if enh:
+                result = enh.apply_filter(img, req.filter)
+            else:
+                # Fallback: return original
+                result = img
+        # FIX: Handle skin smooth mode
+        elif req.skin_smooth:
+            if enh:
+                result = enh.skin_smooth(img)
+            else:
+                # Fallback: bilateral filter for smooth effect
+                result = cv2.bilateralFilter(img, 9, 75, 75)
         else:
-            result = img
+            # FIX: Pass ALL parameters to adjust (including highlights, shadows, etc.)
+            if enh:
+                result = enh.adjust(
+                    img,
+                    brightness=req.brightness,
+                    contrast=req.contrast,
+                    saturation=req.saturation,
+                    warmth=req.warmth,
+                    sharpness=req.sharpness,
+                    denoise=req.denoise,
+                    highlights=req.highlights,
+                    shadows=req.shadows,
+                    vibrance=req.vibrance,
+                    clarity=req.clarity,
+                    tint=req.tint,
+                )
+            else:
+                # Fallback: basic OpenCV adjustments
+                result = img.astype(np.float32)
+                if req.brightness != 0 or req.contrast != 0:
+                    result = result * (1.0 + req.contrast) + req.brightness * 255
+                if req.saturation != 0:
+                    hsv = cv2.cvtColor(result.clip(0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+                    hsv[:, :, 1] = hsv[:, :, 1] * (1.0 + req.saturation)
+                    hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+                    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+                if req.warmth != 0:
+                    result[:, :, 2] += req.warmth * 30
+                    result[:, :, 0] -= req.warmth * 20
+                if req.denoise > 0:
+                    h_param = int(req.denoise * 15) + 3
+                    result = cv2.fastNlMeansDenoisingColored(
+                        result.clip(0, 255).astype(np.uint8), None, h_param, h_param, 7, 21
+                    ).astype(np.float32)
+                if req.sharpness > 0:
+                    blurred = cv2.GaussianBlur(result, (0, 0), 3)
+                    result = result + (result - blurred) * req.sharpness * 3
+                result = result.clip(0, 255).astype(np.uint8)
+
         rid = str(uuid.uuid4())[:8]
         rpath = OUTPUT_DIR / f"{rid}.jpg"
         cv2.imwrite(str(rpath), result)
