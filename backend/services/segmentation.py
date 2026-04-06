@@ -1,9 +1,10 @@
 """
 Segmentation Service - AI语义分割
-基于 SAM2 (Segment Anything Model 2) + MediaPipe
+基于 SAM2 (Segment Anything Model 2) + MediaPipe ImageSegmenter
 支持：交互式分割、自动人物检测、天空检测
 """
 
+import os
 import numpy as np
 import cv2
 import torch
@@ -22,7 +23,7 @@ class SegmentationService:
         self.model_type = model_type
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self._sam = None
-        self._mp_selfie = None
+        self._mp_segmenter = None
         self._load_model()
 
     def _load_model(self):
@@ -54,17 +55,38 @@ class SegmentationService:
                 print("[Segmentation] SAM (v1) 加载完成")
             except Exception as e:
                 print(f"[Segmentation] SAM 加载失败: {e}")
-                print("[Segmentation] 回退到 MediaPipe + 传统CV方法")
-                self.model_type = "cv"
+                print("[Segmentation] 回退到 MediaPipe ImageSegmenter")
+                self._load_mediapipe()
 
     def _load_mediapipe(self):
-        """加载 MediaPipe 自拍分割"""
+        """加载 MediaPipe ImageSegmenter (v0.10+ tasks API)"""
         try:
             import mediapipe as mp
-            self._mp_selfie = mp.SelfieSegmentation(model_selection=1)
-            print("[Segmentation] MediaPipe 加载完成")
-        except ImportError:
-            print("[Segmentation] MediaPipe 未安装，使用传统CV方法")
+            from mediapipe.tasks import python
+            from mediapipe.tasks.python import vision
+
+            # Find model path relative to this file
+            model_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "models", "selfie_segmenter.tflite"
+            )
+
+            if os.path.exists(model_path):
+                base_options = python.BaseOptions(model_asset_path=model_path)
+                options = vision.ImageSegmenterOptions(
+                    base_options=base_options,
+                    output_category_mask=True
+                )
+                self._mp_segmenter = vision.ImageSegmenter.create_from_options(options)
+                self.model_type = "mediapipe"
+                print("[Segmentation] MediaPipe ImageSegmenter 加载完成")
+            else:
+                print(f"[Segmentation] MediaPipe 模型文件不存在: {model_path}")
+                print("[Segmentation] 回退到传统CV方法")
+                self.model_type = "cv"
+        except Exception as e:
+            print(f"[Segmentation] MediaPipe 加载失败: {e}")
+            print("[Segmentation] 回退到传统CV方法")
             self.model_type = "cv"
 
     def predict(
@@ -192,14 +214,25 @@ class SegmentationService:
             return self._detect_people_cv(image)
 
     def _detect_people_mediapipe(self, image: np.ndarray) -> list[np.ndarray]:
-        """MediaPipe 人物分割"""
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        results = self._mp_selfie.process(rgb)
+        """MediaPipe ImageSegmenter 人物分割"""
+        import mediapipe as mp
 
-        if results.segmentation_mask is not None:
-            mask = (results.segmentation_mask > 0.5).astype(np.uint8) * 255
-            # 用连通区域分离多人
-            return self._split_connected_regions(mask)
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+        result = self._mp_segmenter.segment(mp_image)
+        category_mask = result.category_mask.numpy_view()
+
+        # category_mask: 0=background, 1=person (selfie segmenter)
+        # Some versions use 255 for person
+        person_mask = (category_mask > 0).astype(np.uint8) * 255
+
+        if np.count_nonzero(person_mask) > 0:
+            # Morphological cleanup
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            person_mask = cv2.morphologyEx(person_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            person_mask = cv2.morphologyEx(person_mask, cv2.MORPH_OPEN, kernel, iterations=1)
+            return self._split_connected_regions(person_mask)
         return []
 
     def _detect_people_cv(self, image: np.ndarray) -> list[np.ndarray]:

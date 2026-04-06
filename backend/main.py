@@ -591,4 +591,4 @@ async def download_result(result_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8765, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8765, reload=False)
