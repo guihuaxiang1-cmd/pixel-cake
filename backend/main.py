@@ -1,6 +1,8 @@
 """
 Pixel Cake - AI 修图工具后端
 基于 FastAPI + PyTorch，提供AI修图服务
+
+FIXED VERSION - resolves frontend/backend API mismatches
 """
 
 import os
@@ -83,6 +85,72 @@ def get_enhance() -> EnhanceService:
 
 
 # ──────────────────────────────────────────────
+# 辅助：肤色/牙齿/地面检测 (不依赖 SAM2)
+# ──────────────────────────────────────────────
+
+def detect_skin_mask(image: np.ndarray) -> np.ndarray:
+    """HSV + YCrCb 双色彩空间肤色检测"""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    ycrcb = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)
+
+    lower_hsv = np.array([0, 20, 70], dtype=np.uint8)
+    upper_hsv = np.array([20, 255, 255], dtype=np.uint8)
+    mask_hsv = cv2.inRange(hsv, lower_hsv, upper_hsv)
+
+    lower_ycrcb = np.array([0, 133, 77], dtype=np.uint8)
+    upper_ycrcb = np.array([255, 173, 127], dtype=np.uint8)
+    mask_ycrcb = cv2.inRange(ycrcb, lower_ycrcb, upper_ycrcb)
+
+    mask = cv2.bitwise_or(mask_hsv, mask_ycrcb)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    return mask
+
+
+def detect_teeth_mask(image: np.ndarray) -> np.ndarray:
+    """亮度 + 面部区域启发式牙齿检测"""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    h, w = image.shape[:2]
+
+    _, bright = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    region_mask = np.zeros((h, w), dtype=np.uint8)
+    region_mask[h//3:h*2//3, w//4:w*3//4] = 255
+    mask = cv2.bitwise_and(bright, region_mask)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+    return mask
+
+
+def detect_ground_mask(image: np.ndarray) -> np.ndarray:
+    """草地/地面区域检测"""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    h, w = image.shape[:2]
+
+    lower_green = np.array([25, 20, 20], dtype=np.uint8)
+    upper_green = np.array([85, 255, 255], dtype=np.uint8)
+    mask_green = cv2.inRange(hsv, lower_green, upper_green)
+
+    lower_brown = np.array([10, 30, 20], dtype=np.uint8)
+    upper_brown = np.array([25, 255, 200], dtype=np.uint8)
+    mask_brown = cv2.inRange(hsv, lower_brown, upper_brown)
+
+    mask = cv2.bitwise_or(mask_green, mask_brown)
+
+    weight = np.zeros((h, w), dtype=np.float32)
+    for i in range(h):
+        weight[i, :] = max(0, (i / h) - 0.3) / 0.7
+    mask = (mask.astype(np.float32) * weight).astype(np.uint8)
+    _, mask = cv2.threshold(mask, 50, 255, cv2.THRESH_BINARY)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    return mask
+
+
+# ──────────────────────────────────────────────
 # 数据模型
 # ──────────────────────────────────────────────
 
@@ -102,6 +170,7 @@ class InpaintRequest(BaseModel):
     strength: float = 0.8
     guidance_scale: float = 7.5
     steps: int = 30
+    fill_type: Optional[str] = None  # FIX: accept fill_type (whiten, grass)
 
 
 class SkyReplaceRequest(BaseModel):
@@ -120,6 +189,12 @@ class EnhanceRequest(BaseModel):
     warmth: float = 0.0        # -1 ~ 1
     sharpness: float = 0.0     # 0 ~ 1
     denoise: float = 0.0       # 0 ~ 1
+    # FIX: Add missing fields that frontend sends
+    highlights: float = 0.0
+    shadows: float = 0.0
+    vibrance: float = 0.0
+    clarity: float = 0.0
+    tint: float = 0.0
     filter: Optional[str] = None     # 滤镜名称
     skin_smooth: bool = False  # 是否磨皮
 
@@ -173,7 +248,6 @@ async def upload_image(file: UploadFile = File(...)):
     content = await file.read()
     save_path.write_bytes(content)
 
-    # 获取图片信息
     img = Image.open(io.BytesIO(content))
     w, h = img.size
 
@@ -209,10 +283,7 @@ async def get_image(image_id: str, max_size: int = 2048):
 
 @app.post("/segment")
 async def segment_object(req: MaskRequest):
-    """
-    使用SAM2进行交互式分割
-    传入点击坐标，返回掩码
-    """
+    """SAM2 交互式分割"""
     matches = list(UPLOAD_DIR.glob(f"{req.image_id}.*"))
     if not matches:
         raise HTTPException(404, "图片不存在")
@@ -227,12 +298,10 @@ async def segment_object(req: MaskRequest):
 
     mask = seg.predict(img, points=points, box=box)
 
-    # 保存掩码
     mask_id = str(uuid.uuid4())[:8]
     mask_path = OUTPUT_DIR / f"{mask_id}_mask.png"
     cv2.imwrite(str(mask_path), mask)
 
-    # 返回掩码预览
     mask_img = Image.fromarray(mask)
     buf = io.BytesIO()
     mask_img.save(buf, format="PNG")
@@ -248,7 +317,7 @@ async def segment_object(req: MaskRequest):
 @app.post("/auto-segment")
 async def auto_segment(
     image_id: str = Form(...),
-    mode: str = Form("person"),  # person, sky, all
+    mode: str = Form("person"),  # FIX: now supports person, sky, skin, teeth, ground, all
 ):
     """自动分割（无需点击）"""
     matches = list(UPLOAD_DIR.glob(f"{image_id}.*"))
@@ -258,14 +327,23 @@ async def auto_segment(
     img = load_image(str(matches[0]))
     seg = get_segmentation()
 
+    # FIX: Expanded mode handling
     if mode == "person":
         masks = seg.auto_detect_people(img)
     elif mode == "sky":
         masks = seg.auto_detect_sky(img)
+    elif mode == "skin":
+        skin = detect_skin_mask(img)
+        masks = [skin] if cv2.countNonZero(skin) > 0 else []
+    elif mode == "teeth":
+        teeth = detect_teeth_mask(img)
+        masks = [teeth] if cv2.countNonZero(teeth) > 0 else []
+    elif mode == "ground":
+        ground = detect_ground_mask(img)
+        masks = [ground] if cv2.countNonZero(ground) > 0 else []
     else:
         masks = seg.auto_detect_all(img)
 
-    # 合并所有掩码
     if masks:
         combined = np.zeros_like(masks[0])
         for m in masks:
@@ -292,11 +370,7 @@ async def auto_segment(
 
 @app.post("/inpaint")
 async def inpaint(req: InpaintRequest):
-    """
-    AI图像修复 - 核心功能
-    去路人、去纹身、去胡渣、消除穿帮都走这个接口
-    """
-    # 查找原图
+    """AI图像修复 - 核心功能"""
     img_matches = list(UPLOAD_DIR.glob(f"{req.image_id}.*"))
     if not img_matches:
         raise HTTPException(404, "原图不存在")
@@ -308,18 +382,29 @@ async def inpaint(req: InpaintRequest):
     img = load_image(str(img_matches[0]))
     mask = cv2.imread(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
 
-    inp = get_inpainting()
-    result = inp.inpaint(
-        image=img,
-        mask=mask,
-        prompt=req.prompt,
-        negative_prompt=req.negative_prompt,
-        strength=req.strength,
-        guidance_scale=req.guidance_scale,
-        num_steps=req.steps,
-    )
+    # FIX: handle fill_type (whiten, grass) before standard inpaint
+    if req.fill_type == "whiten":
+        enh = get_enhance()
+        result = enh.local_adjust(img, mask, brightness=0.3, saturation=-0.2)
+    elif req.fill_type == "grass":
+        result = img.copy()
+        mask_bool = mask > 127
+        green = np.array([50, 140, 50], dtype=np.uint8)
+        noise = np.random.randint(-20, 20, img.shape, dtype=np.int16)
+        grass_color = np.clip(green.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+        result[mask_bool] = grass_color[mask_bool]
+    else:
+        inp = get_inpainting()
+        result = inp.inpaint(
+            image=img,
+            mask=mask,
+            prompt=req.prompt,
+            negative_prompt=req.negative_prompt,
+            strength=req.strength,
+            guidance_scale=req.guidance_scale,
+            num_steps=req.steps,
+        )
 
-    # 保存结果
     result_id = str(uuid.uuid4())[:8]
     result_path = OUTPUT_DIR / f"{result_id}.jpg"
     cv2.imwrite(str(result_path), result)
@@ -383,11 +468,11 @@ async def replace_sky(req: SkyReplaceRequest):
     return StreamingResponse(buf, media_type="image/jpeg")
 
 
-# ─── 图像增强（调色） ───
+# ─── 图像增强（调色 / 滤镜 / 磨皮） ───
 
 @app.post("/enhance")
 async def enhance(req: EnhanceRequest):
-    """调色/增强"""
+    """调色/增强/滤镜/磨皮"""
     matches = list(UPLOAD_DIR.glob(f"{req.image_id}.*"))
     if not matches:
         raise HTTPException(404, "图片不存在")
@@ -395,13 +480,14 @@ async def enhance(req: EnhanceRequest):
     img = load_image(str(matches[0]))
     enh = get_enhance()
 
-    # 如果指定了滤镜，先应用滤镜
+    # FIX: Handle filter mode
     if req.filter:
         result = enh.apply_filter(img, req.filter)
-    # 如果指定磨皮，应用中性灰磨皮
+    # FIX: Handle skin smooth mode
     elif req.skin_smooth:
         result = enh.skin_smooth(img)
     else:
+        # FIX: Pass ALL parameters including highlights, shadows, vibrance, clarity, tint
         result = enh.adjust(
             img,
             brightness=req.brightness,
@@ -410,6 +496,11 @@ async def enhance(req: EnhanceRequest):
             warmth=req.warmth,
             sharpness=req.sharpness,
             denoise=req.denoise,
+            highlights=req.highlights,
+            shadows=req.shadows,
+            vibrance=req.vibrance,
+            clarity=req.clarity,
+            tint=req.tint,
         )
 
     result_id = str(uuid.uuid4())[:8]
