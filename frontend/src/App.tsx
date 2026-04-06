@@ -123,47 +123,135 @@ export default function App() {
     setIsProcessing(true)
 
     try {
-      let endpoint = ''
-      let body: any = {}
+      let blob: Blob | null = null
 
       switch (feature) {
         case 'remove-person':
-          // 先自动检测人物
+        case 'remove-flaw': {
+          // 自动检测 + inpaint
+          const mode = feature === 'remove-person' ? 'person' : 'all'
           const segRes = await fetch('/api/auto-segment', {
             method: 'POST',
-            body: new URLSearchParams({ image_id: image.imageId, mode: 'person' }),
+            body: new URLSearchParams({ image_id: image.imageId, mode }),
           })
           const maskId = segRes.headers.get('X-Mask-Id')
           if (maskId) {
-            endpoint = '/api/inpaint'
-            body = { image_id: image.imageId, mask_id: maskId }
+            const inpRes = await fetch('/api/inpaint', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ image_id: image.imageId, mask_id: maskId }),
+            })
+            blob = await inpRes.blob()
           }
           break
-        case 'sky-replace':
-          endpoint = '/api/sky/replace'
-          body = { image_id: image.imageId, sky_type: 'sunset', blend_strength: 0.7 }
+        }
+        case 'remove-tattoo':
+        case 'remove-stubble': {
+          // 皮肤区域检测 + inpaint
+          const segRes = await fetch('/api/auto-segment', {
+            method: 'POST',
+            body: new URLSearchParams({ image_id: image.imageId, mode: 'skin' }),
+          })
+          const maskId = segRes.headers.get('X-Mask-Id')
+          if (maskId) {
+            const inpRes = await fetch('/api/inpaint', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ image_id: image.imageId, mask_id: maskId }),
+            })
+            blob = await inpRes.blob()
+          }
           break
-        case 'relight':
+        }
+        case 'relight': {
           const fd = new FormData()
           fd.append('image_id', image.imageId)
           fd.append('brightness', '0.3')
           fd.append('warmth', '0.1')
           const res = await fetch('/api/relight', { method: 'POST', body: fd })
-          const blob = await res.blob()
-          const url = URL.createObjectURL(blob)
-          setResultUrl(url)
-          setHistory(prev => [...prev.slice(0, historyIndex + 1), url])
-          setHistoryIndex(prev => prev + 1)
+          blob = await res.blob()
           break
+        }
+        case 'sky-replace': {
+          const res = await fetch('/api/sky/replace', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_id: image.imageId, sky_type: 'sunset', blend_strength: 0.7 }),
+          })
+          blob = await res.blob()
+          break
+        }
+        case 'fill-grass': {
+          const segRes = await fetch('/api/auto-segment', {
+            method: 'POST',
+            body: new URLSearchParams({ image_id: image.imageId, mode: 'ground' }),
+          })
+          const maskId = segRes.headers.get('X-Mask-Id')
+          if (maskId) {
+            const inpRes = await fetch('/api/inpaint', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ image_id: image.imageId, mask_id: maskId, fill_type: 'grass' }),
+            })
+            blob = await inpRes.blob()
+          }
+          break
+        }
+        case 'skin-smooth': {
+          const res = await fetch('/api/enhance', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              image_id: image.imageId,
+              brightness: 0,
+              contrast: 0,
+              saturation: 0,
+              warmth: 0,
+              sharpness: 0,
+              denoise: 0.4,
+              skin_smooth: true,
+            }),
+          })
+          blob = await res.blob()
+          break
+        }
+        case 'color-match': {
+          // AI追色：需要参考图，暂时用自动调色代替
+          const res = await fetch('/api/enhance', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              image_id: image.imageId,
+              brightness: 0.05,
+              contrast: 0.1,
+              saturation: 0.08,
+              warmth: 0.05,
+              sharpness: 0.1,
+              denoise: 0.1,
+            }),
+          })
+          blob = await res.blob()
+          break
+        }
+        case 'teeth-whiten': {
+          const segRes = await fetch('/api/auto-segment', {
+            method: 'POST',
+            body: new URLSearchParams({ image_id: image.imageId, mode: 'teeth' }),
+          })
+          const maskId = segRes.headers.get('X-Mask-Id')
+          if (maskId) {
+            const inpRes = await fetch('/api/inpaint', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ image_id: image.imageId, mask_id: maskId, fill_type: 'whiten' }),
+            })
+            blob = await inpRes.blob()
+          }
+          break
+        }
       }
 
-      if (endpoint) {
-        const res = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        })
-        const blob = await res.blob()
+      if (blob) {
         const url = URL.createObjectURL(blob)
         setResultUrl(url)
         setHistory(prev => [...prev.slice(0, historyIndex + 1), url])
@@ -209,8 +297,31 @@ export default function App() {
   const handleFilter = useCallback(async (filterName: string) => {
     if (!image) return
     setSelectedFilter(filterName)
-    // 调用后端应用滤镜（复用 enhance 接口）
-    // 实际项目中可以单独加一个 /filter 接口
+    setIsProcessing(true)
+    try {
+      const res = await fetch('/api/enhance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_id: image.imageId,
+          filter: filterName,
+          brightness: 0,
+          contrast: 0,
+          saturation: 0,
+          warmth: 0,
+          sharpness: 0,
+          denoise: 0,
+        }),
+      })
+      if (res.ok) {
+        const blob = await res.blob()
+        setResultUrl(URL.createObjectURL(blob))
+      }
+    } catch (err) {
+      console.error('滤镜失败:', err)
+    } finally {
+      setIsProcessing(false)
+    }
   }, [image])
 
   // ─── 撤销/重做 ───
