@@ -79,10 +79,30 @@ def main():
         return _services.get(name)
 
     def load_image(path: str):
-        img = cv2.imread(path)
+        """安全加载图像 - 支持中文路径"""
+        img_array = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError(f"Cannot load: {path}")
         return img
+
+    def imwrite_safe(path, image, params=None):
+        """安全写入图像 - 支持中文路径"""
+        ext = Path(path).suffix.lower()
+        if params is None:
+            if ext in (".jpg", ".jpeg"):
+                params = [cv2.IMWRITE_JPEG_QUALITY, 95]
+            elif ext == ".png":
+                params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
+        success, buf = cv2.imencode(ext, image, params or [])
+        if success:
+            Path(path).write_bytes(buf.tobytes())
+        return success
+
+    def imread_safe(path, flags=cv2.IMREAD_COLOR):
+        """安全读取图像 - 支持中文路径"""
+        img_array = np.fromfile(path, dtype=np.uint8)
+        return cv2.imdecode(img_array, flags)
 
     # -- Skin detection fallback (for tattoo/stubble removal) --
     def detect_skin_mask(image: np.ndarray) -> np.ndarray:
@@ -282,7 +302,7 @@ def main():
 
         mask_id = str(uuid.uuid4())[:8]
         mask_path = OUTPUT_DIR / f"{mask_id}_mask.png"
-        cv2.imwrite(str(mask_path), combined)
+        imwrite_safe(str(mask_path), combined)
         return FileResponse(str(mask_path), headers={"X-Mask-Id": mask_id})
 
     @app.post("/api/inpaint")
@@ -294,7 +314,7 @@ def main():
         if not mask_matches:
             raise HTTPException(404, "Mask not found")
         img = load_image(str(img_matches[0]))
-        mask = cv2.imread(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
+        mask = imread_safe(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
 
         # FIX: handle fill_type (whiten, grass) before standard inpaint
         if req.fill_type == "whiten":
@@ -329,7 +349,7 @@ def main():
 
         rid = str(uuid.uuid4())[:8]
         rpath = OUTPUT_DIR / f"{rid}.jpg"
-        cv2.imwrite(str(rpath), result)
+        imwrite_safe(str(rpath), result)
         return FileResponse(str(rpath), headers={"X-Result-Id": rid})
 
     @app.post("/api/enhance")
@@ -396,7 +416,7 @@ def main():
 
         rid = str(uuid.uuid4())[:8]
         rpath = OUTPUT_DIR / f"{rid}.jpg"
-        cv2.imwrite(str(rpath), result)
+        imwrite_safe(str(rpath), result)
         return FileResponse(str(rpath))
 
     @app.post("/api/sky/replace")
@@ -412,7 +432,7 @@ def main():
             result = img
         rid = str(uuid.uuid4())[:8]
         rpath = OUTPUT_DIR / f"{rid}.jpg"
-        cv2.imwrite(str(rpath), result)
+        imwrite_safe(str(rpath), result)
         return FileResponse(str(rpath))
 
     @app.post("/api/relight")
@@ -428,7 +448,7 @@ def main():
             result = np.clip(img.astype(np.float32) + brightness * 150, 0, 255).astype(np.uint8)
         rid = str(uuid.uuid4())[:8]
         rpath = OUTPUT_DIR / f"{rid}.jpg"
-        cv2.imwrite(str(rpath), result)
+        imwrite_safe(str(rpath), result)
         return FileResponse(str(rpath))
 
     # -- Frontend --

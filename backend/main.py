@@ -25,6 +25,7 @@ from services.segmentation import SegmentationService
 from services.sky import SkyService
 from services.enhance import EnhanceService
 from utils.image_utils import (
+    imread_safe, imwrite_safe,
     load_image, save_image, image_to_bytes,
     resize_for_display, create_mask_from_points
 )
@@ -300,7 +301,7 @@ async def segment_object(req: MaskRequest):
 
     mask_id = str(uuid.uuid4())[:8]
     mask_path = OUTPUT_DIR / f"{mask_id}_mask.png"
-    cv2.imwrite(str(mask_path), mask)
+    imwrite_safe(str(mask_path), mask)
 
     mask_img = Image.fromarray(mask)
     buf = io.BytesIO()
@@ -353,7 +354,7 @@ async def auto_segment(
 
     mask_id = str(uuid.uuid4())[:8]
     mask_path = OUTPUT_DIR / f"{mask_id}_mask.png"
-    cv2.imwrite(str(mask_path), combined)
+    imwrite_safe(str(mask_path), combined)
 
     mask_img = Image.fromarray(combined)
     buf = io.BytesIO()
@@ -380,7 +381,7 @@ async def inpaint(req: InpaintRequest):
         raise HTTPException(404, "掩码不存在")
 
     img = load_image(str(img_matches[0]))
-    mask = cv2.imread(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
+    mask = imread_safe(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
 
     # FIX: handle fill_type (whiten, grass) before standard inpaint
     if req.fill_type == "whiten":
@@ -407,7 +408,7 @@ async def inpaint(req: InpaintRequest):
 
     result_id = str(uuid.uuid4())[:8]
     result_path = OUTPUT_DIR / f"{result_id}.jpg"
-    cv2.imwrite(str(result_path), result)
+    imwrite_safe(str(result_path), result)
 
     buf = io.BytesIO()
     Image.fromarray(result).save(buf, format="JPEG", quality=95)
@@ -437,7 +438,7 @@ async def relight(
 
     result_id = str(uuid.uuid4())[:8]
     result_path = OUTPUT_DIR / f"{result_id}.jpg"
-    cv2.imwrite(str(result_path), result)
+    imwrite_safe(str(result_path), result)
 
     buf = io.BytesIO()
     Image.fromarray(result).save(buf, format="JPEG", quality=95)
@@ -460,7 +461,7 @@ async def replace_sky(req: SkyReplaceRequest):
 
     result_id = str(uuid.uuid4())[:8]
     result_path = OUTPUT_DIR / f"{result_id}.jpg"
-    cv2.imwrite(str(result_path), result)
+    imwrite_safe(str(result_path), result)
 
     buf = io.BytesIO()
     Image.fromarray(result).save(buf, format="JPEG", quality=95)
@@ -505,7 +506,7 @@ async def enhance(req: EnhanceRequest):
 
     result_id = str(uuid.uuid4())[:8]
     result_path = OUTPUT_DIR / f"{result_id}.jpg"
-    cv2.imwrite(str(result_path), result)
+    imwrite_safe(str(result_path), result)
 
     buf = io.BytesIO()
     Image.fromarray(result).save(buf, format="JPEG", quality=95)
@@ -548,7 +549,7 @@ async def batch_process(req: BatchRequest):
 
             result_id = str(uuid.uuid4())[:8]
             result_path = OUTPUT_DIR / f"{result_id}.jpg"
-            cv2.imwrite(str(result_path), result)
+            imwrite_safe(str(result_path), result)
             results.append({"image_id": img_id, "result_id": result_id, "status": "ok"})
 
         except Exception as e:
