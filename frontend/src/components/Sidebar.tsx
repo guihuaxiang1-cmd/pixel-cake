@@ -9,7 +9,9 @@ interface SidebarProps {
   onParamsChange: (params: Partial<AdjustParams>) => void
   onAIFeature: (feature: AIFeature) => void
   selectedFilter: string | null
-  onFilterSelect: (name: string) => void
+  onFilterSelect: (name: string, intensity?: number) => void
+  filterIntensity: number
+  onFilterIntensityChange: (v: number) => void
   isProcessing: boolean
 }
 
@@ -35,6 +37,8 @@ export default function Sidebar({
   onAIFeature,
   selectedFilter,
   onFilterSelect,
+  filterIntensity,
+  onFilterIntensityChange,
   isProcessing,
 }: SidebarProps) {
   return (
@@ -80,6 +84,8 @@ export default function Sidebar({
             filters={filters}
             selected={selectedFilter}
             onSelect={onFilterSelect}
+            intensity={filterIntensity}
+            onIntensityChange={onFilterIntensityChange}
           />
         )}
         {mode === 'ai' && (
@@ -219,10 +225,14 @@ function FilterPanel({
   filters,
   selected,
   onSelect,
+  intensity,
+  onIntensityChange,
 }: {
   filters: string[]
   selected: string | null
-  onSelect: (name: string) => void
+  onSelect: (name: string, intensity?: number) => void
+  intensity: number
+  onIntensityChange: (v: number) => void
 }) {
   return (
     <div>
@@ -246,7 +256,8 @@ function FilterPanel({
       </div>
 
       <div className="mt-4 pt-3 border-t border-dark-700">
-        <Slider label="滤镜强度" value={1} min={0} max={1} step={0.01} onChange={() => {}} />
+        <Slider label="滤镜强度" value={intensity} min={0} max={1} step={0.01}
+          onChange={(v) => { onIntensityChange(v); if (selected) onSelect(selected, v); }} />
       </div>
 
       <div className="mt-3">

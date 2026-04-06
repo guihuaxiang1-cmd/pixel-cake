@@ -192,9 +192,9 @@ class SkyService:
             for _ in range(n_stars):
                 x = rng.integers(0, w)
                 y = rng.integers(0, h)
-                brightness = rng.integers(180, 255)
-                size = rng.choice([1, 1, 1, 2])
-                cv2.circle(sky, (x, y), size, (brightness, brightness, brightness), -1)
+                brightness = int(rng.integers(180, 255))
+                size = int(rng.choice([1, 1, 1, 2]))
+                cv2.circle(sky, (int(x), int(y)), size, (brightness, brightness, brightness), -1)
 
         return sky
 

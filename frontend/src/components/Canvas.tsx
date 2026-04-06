@@ -7,6 +7,7 @@ interface CanvasProps {
   tool: Tool
   brushSize: number
   zoom: number
+  onZoomChange?: (z: number) => void
   isProcessing: boolean
   onAIFeature: (feature: AIFeature) => void
   onMaskInpaint: (maskBlob: Blob) => void
@@ -20,6 +21,7 @@ export default function Canvas({
   tool,
   brushSize,
   zoom,
+  onZoomChange,
   isProcessing,
   onAIFeature,
   onMaskInpaint,
@@ -213,8 +215,12 @@ export default function Canvas({
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       e.preventDefault()
+      if (!onZoomChange) return
+      const delta = e.deltaY > 0 ? -0.1 : 0.1
+      const newZoom = Math.max(0.1, Math.min(5, zoom + delta))
+      onZoomChange(Math.round(newZoom * 100) / 100)
     },
-    []
+    [zoom, onZoomChange]
   )
 
   const cursorMap: Record<Tool, string> = {

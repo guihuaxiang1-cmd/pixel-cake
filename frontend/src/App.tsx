@@ -88,6 +88,7 @@ export default function App() {
   const [historyIndex, setHistoryIndex] = useState(-1)
   const [zoom, setZoom] = useState(1)
   const [selectedFilter, setSelectedFilter] = useState<string | null>(null)
+  const [filterIntensity, setFilterIntensity] = useState(1.0)
   // FIX: Add error message state for user-visible feedback
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
@@ -124,6 +125,7 @@ export default function App() {
     setHistoryIndex(0)
     setParams(defaultParams)
     setSelectedFilter(null)
+    setFilterIntensity(1.0)
   }, [])
 
   // ─── AI 操作 ───
@@ -335,19 +337,21 @@ export default function App() {
 
   // ─── 滤镜 ───
 
-  const handleFilter = useCallback(async (filterName: string) => {
+  const handleFilter = useCallback(async (filterName: string, intensity?: number) => {
     if (!image) return
     setSelectedFilter(filterName)
+    const effIntensity = intensity ?? filterIntensity
+    if (intensity !== undefined) setFilterIntensity(intensity)
     setIsProcessing(true)
     setErrorMsg(null)
     try {
-      // FIX: Only send filter name + required fields, backend now handles filter field
       const res = await fetch('/api/enhance', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           image_id: image.imageId,
           filter: filterName,
+          filter_intensity: effIntensity,
           brightness: 0,
           contrast: 0,
           saturation: 0,
@@ -369,7 +373,7 @@ export default function App() {
     } finally {
       setIsProcessing(false)
     }
-  }, [image])
+  }, [image, filterIntensity])
 
   // ─── 撤销/重做 ───
 
@@ -477,6 +481,7 @@ export default function App() {
               tool={tool}
               brushSize={brushSize}
               zoom={zoom}
+              onZoomChange={setZoom}
               isProcessing={isProcessing}
               onAIFeature={handleAIFeature}
               onMaskInpaint={handleMaskInpaint}
@@ -546,6 +551,8 @@ export default function App() {
           onAIFeature={handleAIFeature}
           selectedFilter={selectedFilter}
           onFilterSelect={handleFilter}
+          filterIntensity={filterIntensity}
+          onFilterIntensityChange={setFilterIntensity}
           isProcessing={isProcessing}
         />
       </div>

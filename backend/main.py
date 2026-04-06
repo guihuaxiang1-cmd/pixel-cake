@@ -193,10 +193,13 @@ class EnhanceRequest(BaseModel):
     # FIX: Add missing fields that frontend sends
     highlights: float = 0.0
     shadows: float = 0.0
+    whites: float = 0.0
+    blacks: float = 0.0
     vibrance: float = 0.0
     clarity: float = 0.0
     tint: float = 0.0
     filter: Optional[str] = None     # 滤镜名称
+    filter_intensity: float = 1.0    # 滤镜强度 0-1
     skin_smooth: bool = False  # 是否磨皮
 
 
@@ -378,10 +381,15 @@ async def inpaint(req: InpaintRequest):
 
     mask_matches = list(OUTPUT_DIR.glob(f"{req.mask_id}_mask.png"))
     if not mask_matches:
+        # Fallback: mask may have been uploaded as a regular image via /upload
+        mask_matches = list(UPLOAD_DIR.glob(f"{req.mask_id}.*"))
+    if not mask_matches:
         raise HTTPException(404, "掩码不存在")
 
     img = load_image(str(img_matches[0]))
     mask = imread_safe(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise HTTPException(404, "掩码文件无法读取")
 
     # FIX: handle fill_type (whiten, grass) before standard inpaint
     if req.fill_type == "whiten":
@@ -483,7 +491,7 @@ async def enhance(req: EnhanceRequest):
 
     # FIX: Handle filter mode
     if req.filter:
-        result = enh.apply_filter(img, req.filter)
+        result = enh.apply_filter(img, req.filter, intensity=req.filter_intensity)
     # FIX: Handle skin smooth mode
     elif req.skin_smooth:
         result = enh.skin_smooth(img)
@@ -499,6 +507,8 @@ async def enhance(req: EnhanceRequest):
             denoise=req.denoise,
             highlights=req.highlights,
             shadows=req.shadows,
+            whites=req.whites,
+            blacks=req.blacks,
             vibrance=req.vibrance,
             clarity=req.clarity,
             tint=req.tint,

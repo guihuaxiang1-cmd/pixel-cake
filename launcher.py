@@ -205,10 +205,13 @@ def main():
         # FIX: Add missing fields that frontend sends
         highlights: float = 0.0
         shadows: float = 0.0
+        whites: float = 0.0
+        blacks: float = 0.0
         vibrance: float = 0.0
         clarity: float = 0.0
         tint: float = 0.0
         filter: Optional[str] = None
+        filter_intensity: float = 1.0
         skin_smooth: bool = False
 
     # -- API Routes --
@@ -312,9 +315,14 @@ def main():
         if not img_matches:
             raise HTTPException(404, "Image not found")
         if not mask_matches:
+            # FIX: Also check if mask was uploaded as a regular image
+            mask_matches = list(UPLOAD_DIR.glob(f"{req.mask_id}.*"))
+        if not mask_matches:
             raise HTTPException(404, "Mask not found")
         img = load_image(str(img_matches[0]))
         mask = imread_safe(str(mask_matches[0]), cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise HTTPException(404, "Mask file unreadable")
 
         # FIX: handle fill_type (whiten, grass) before standard inpaint
         if req.fill_type == "whiten":
@@ -363,7 +371,7 @@ def main():
         # FIX: Handle filter mode
         if req.filter:
             if enh:
-                result = enh.apply_filter(img, req.filter)
+                result = enh.apply_filter(img, req.filter, intensity=req.filter_intensity)
             else:
                 # Fallback: return original
                 result = img
@@ -387,6 +395,8 @@ def main():
                     denoise=req.denoise,
                     highlights=req.highlights,
                     shadows=req.shadows,
+                    whites=req.whites,
+                    blacks=req.blacks,
                     vibrance=req.vibrance,
                     clarity=req.clarity,
                     tint=req.tint,
