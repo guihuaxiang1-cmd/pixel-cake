@@ -91,11 +91,17 @@ export default function App() {
   const [filterIntensity, setFilterIntensity] = useState(1.0)
   // FIX: Add error message state for user-visible feedback
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [toastType, setToastType] = useState<'error' | 'info'>('error')
+
+  const showToast = useCallback((msg: string | null, type: 'error' | 'info' = 'info') => {
+    setErrorMsg(msg)
+    setToastType(type)
+  }, [])
 
   // Auto-clear error after 5 seconds
   useEffect(() => {
     if (errorMsg) {
-      const timer = setTimeout(() => setErrorMsg(null), 5000)
+      const timer = setTimeout(() => showToast(null, 'error'), 5000)
       return () => clearTimeout(timer)
     }
   }, [errorMsg])
@@ -133,7 +139,7 @@ export default function App() {
   const handleAIFeature = useCallback(async (feature: AIFeature) => {
     if (!image) return
     setIsProcessing(true)
-    setErrorMsg(null)
+    showToast(null, 'error')
 
     try {
       let blob: Blob | null = null
@@ -285,12 +291,12 @@ export default function App() {
         setHistoryIndex(prev => prev + 1)
       } else {
         // FIX: No result = show error
-        setErrorMsg('处理未返回结果，请检查图片是否正确上传')
+        showToast('处理未返回结果，请检查图片是否正确上传', 'error')
       }
     } catch (err: any) {
       console.error('AI处理失败:', err)
       // FIX: User-visible error message
-      setErrorMsg(`AI 处理失败: ${err.message || '未知错误'}`)
+      showToast(`AI 处理失败: ${err.message || '未知错误'}`, 'error')
     } finally {
       setIsProcessing(false)
     }
@@ -331,7 +337,7 @@ export default function App() {
       setResultUrl(URL.createObjectURL(blob))
     } catch (err: any) {
       console.error('调色失败:', err)
-      setErrorMsg(`调色失败: ${err.message}`)
+      showToast(`调色失败: ${err.message}`, 'error')
     }
   }, [image, params])
 
@@ -343,7 +349,7 @@ export default function App() {
     const effIntensity = intensity ?? filterIntensity
     if (intensity !== undefined) setFilterIntensity(intensity)
     setIsProcessing(true)
-    setErrorMsg(null)
+    showToast(null, 'error')
     try {
       const res = await fetch('/api/enhance', {
         method: 'POST',
@@ -369,7 +375,7 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('滤镜失败:', err)
-      setErrorMsg(`滤镜失败: ${err.message}`)
+      showToast(`滤镜失败: ${err.message}`, 'error')
     } finally {
       setIsProcessing(false)
     }
@@ -396,7 +402,7 @@ export default function App() {
   const handleMaskInpaint = useCallback(async (maskBlob: Blob) => {
     if (!image) return
     setIsProcessing(true)
-    setErrorMsg(null)
+    showToast(null, 'error')
     try {
       // 上传 mask
       const maskForm = new FormData()
@@ -423,7 +429,7 @@ export default function App() {
       setHistoryIndex(prev => prev + 1)
     } catch (err: any) {
       console.error('画笔修复失败:', err)
-      setErrorMsg(`修复失败: ${err.message}`)
+      showToast(`修复失败: ${err.message}`, 'error')
     } finally {
       setIsProcessing(false)
     }
@@ -486,7 +492,7 @@ export default function App() {
               onAIFeature={handleAIFeature}
               onMaskInpaint={handleMaskInpaint}
               onClearTool={() => setTool('select')}
-              onError={setErrorMsg}
+              onError={(msg) => showToast(msg, 'error')}
             />
           )}
 
@@ -526,14 +532,20 @@ export default function App() {
             </div>
           )}
 
-          {/* FIX: 错误提示浮层 */}
+          {/* Toast 提示浮层 */}
           {errorMsg && (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 bg-red-900/90 text-red-100 px-6 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-fadeIn">
-              <span className="text-lg">⚠️</span>
+            <div className={`absolute top-4 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-lg shadow-lg flex items-center gap-3 animate-fadeIn ${
+              toastType === 'error'
+                ? 'bg-red-900/90 text-red-100'
+                : 'bg-dark-800/90 text-dark-100 border border-dark-600'
+            }`}>
+              <span className="text-lg">{toastType === 'error' ? '⚠️' : 'ℹ️'}</span>
               <span className="text-sm">{errorMsg}</span>
               <button
-                onClick={() => setErrorMsg(null)}
-                className="ml-2 text-red-300 hover:text-white transition-colors"
+                onClick={() => { showToast(null, 'error'); }}
+                className={`ml-2 hover:text-white transition-colors ${
+                  toastType === 'error' ? 'text-red-300' : 'text-dark-400'
+                }`}
               >
                 ✕
               </button>
@@ -554,6 +566,7 @@ export default function App() {
           filterIntensity={filterIntensity}
           onFilterIntensityChange={setFilterIntensity}
           isProcessing={isProcessing}
+          onShowToast={showToast}
         />
       </div>
     </div>

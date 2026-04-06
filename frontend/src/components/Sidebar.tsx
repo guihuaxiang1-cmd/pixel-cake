@@ -13,6 +13,7 @@ interface SidebarProps {
   filterIntensity: number
   onFilterIntensityChange: (v: number) => void
   isProcessing: boolean
+  onShowToast: (msg: string, type?: 'error' | 'info') => void
 }
 
 const tabs: Array<{ id: AdjustMode; label: string; icon: string }> = [
@@ -40,6 +41,7 @@ export default function Sidebar({
   filterIntensity,
   onFilterIntensityChange,
   isProcessing,
+  onShowToast,
 }: SidebarProps) {
   return (
     <div className="w-72 bg-dark-900 border-l border-dark-700 flex flex-col shrink-0 overflow-hidden">
@@ -67,7 +69,7 @@ export default function Sidebar({
           <BasicPanel params={params} onChange={onParamsChange} />
         )}
         {mode === 'color' && (
-          <ColorPanel params={params} onChange={onParamsChange} />
+          <ColorPanel params={params} onChange={onParamsChange} onShowToast={onShowToast} />
         )}
         {mode === 'detail' && (
           // FIX: Pass onAIFeature to DetailPanel so buttons actually work
@@ -77,6 +79,7 @@ export default function Sidebar({
             onAIFeature={onAIFeature}
             hasImage={!!image}
             isProcessing={isProcessing}
+            onShowToast={onShowToast}
           />
         )}
         {mode === 'filter' && (
@@ -132,10 +135,16 @@ function BasicPanel({
 function ColorPanel({
   params,
   onChange,
+  onShowToast,
 }: {
   params: AdjustParams
   onChange: (p: Partial<AdjustParams>) => void
+  onShowToast: (msg: string, type?: 'error' | 'info') => void
 }) {
+  const handleLocalTool = (name: string) => {
+    onShowToast(`${name}局部调色功能即将上线，敬请期待`, 'info')
+  }
+
   return (
     <div className="space-y-4">
       <Slider label="色温" value={params.warmth} min={-1} max={1} step={0.01}
@@ -150,12 +159,12 @@ function ColorPanel({
       <div className="pt-2 border-t border-dark-700">
         <h4 className="text-xs text-dark-400 mb-3 font-medium">局部调色</h4>
         <div className="grid grid-cols-3 gap-2">
-          <MiniButton label="主体" icon="👤" />
-          <MiniButton label="背景" icon="🏔️" />
-          <MiniButton label="径向" icon="⭕" />
-          <MiniButton label="线性" icon="📐" />
-          <MiniButton label="画笔" icon="🖌️" />
-          <MiniButton label="吸管" icon="💧" />
+          <MiniButton label="主体" icon="👤" onClick={() => handleLocalTool('主体')} />
+          <MiniButton label="背景" icon="🏔️" onClick={() => handleLocalTool('背景')} />
+          <MiniButton label="径向" icon="⭕" onClick={() => handleLocalTool('径向')} />
+          <MiniButton label="线性" icon="📐" onClick={() => handleLocalTool('线性')} />
+          <MiniButton label="画笔" icon="🖌️" onClick={() => handleLocalTool('画笔')} />
+          <MiniButton label="吸管" icon="💧" onClick={() => handleLocalTool('吸管')} />
         </div>
       </div>
     </div>
@@ -170,12 +179,14 @@ function DetailPanel({
   onAIFeature,
   hasImage,
   isProcessing,
+  onShowToast,
 }: {
   params: AdjustParams
   onChange: (p: Partial<AdjustParams>) => void
   onAIFeature: (f: AIFeature) => void
   hasImage: boolean
   isProcessing: boolean
+  onShowToast: (msg: string, type?: 'error' | 'info') => void
 }) {
   return (
     <div className="space-y-4">
@@ -199,10 +210,10 @@ function DetailPanel({
           />
           <FeatureButton label="3D美型" desc="骨骼定位精修" icon="💎"
             disabled={!hasImage || isProcessing}
-            onClick={() => { /* 未实现 */ }} />
+            onClick={() => onShowToast('3D美型功能即将上线，敬请期待', 'info')} />
           <FeatureButton label="发丝处理" desc="祛碎发/换发色" icon="💇"
             disabled={!hasImage || isProcessing}
-            onClick={() => { /* 未实现 */ }} />
+            onClick={() => onShowToast('发丝处理功能即将上线，敬请期待', 'info')} />
           <FeatureButton
             label="牙齿美白"
             desc="自动检测美白"
@@ -212,7 +223,7 @@ function DetailPanel({
           />
           <FeatureButton label="妆容调整" desc="吸管取色调妆" icon="💄"
             disabled={!hasImage || isProcessing}
-            onClick={() => { /* 未实现 */ }} />
+            onClick={() => onShowToast('妆容调整功能即将上线，敬请期待', 'info')} />
         </div>
       </div>
     </div>
@@ -370,19 +381,21 @@ function Slider({
           value={value}
           onChange={e => onChange(Number(e.target.value))}
           className="w-full"
-        />
-        <div
-          className="absolute top-1/2 left-0 h-1 bg-cake-500/60 rounded pointer-events-none -translate-y-1/2"
-          style={{ width: `${percent}%` }}
+          style={{
+            background: `linear-gradient(to right, #ec4899 ${percent}%, #334155 ${percent}%)`,
+          }}
         />
       </div>
     </div>
   )
 }
 
-function MiniButton({ label, icon }: { label: string; icon: string }) {
+function MiniButton({ label, icon, onClick }: { label: string; icon: string; onClick?: () => void }) {
   return (
-    <button className="p-2 rounded-lg bg-dark-800 hover:bg-dark-700 text-center transition-colors">
+    <button
+      onClick={onClick}
+      className="p-2 rounded-lg bg-dark-800 hover:bg-dark-700 text-center transition-colors"
+    >
       <span className="text-lg block">{icon}</span>
       <span className="text-[10px] text-dark-400">{label}</span>
     </button>
